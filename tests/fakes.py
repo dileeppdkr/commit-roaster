@@ -6,7 +6,10 @@ from collections.abc import Sequence
 
 from commit_roaster.diff import Diff
 from commit_roaster.git import GitClient
-from commit_roaster.models import RoastResult, SpiceLevel
+from commit_roaster.models import RoastOutcome, RoastResult, SpiceLevel, TokenUsage
+
+FAKE_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+SAMPLE_USAGE = TokenUsage(model="claude-haiku-5-5", input_tokens=1_200, output_tokens=300)
 
 SAMPLE_DIFF = """\
 diff --git a/app.py b/app.py
@@ -42,12 +45,15 @@ class FakeGit(GitClient):
         self.commits.append(message)
         return "[main abc1234] committed"
 
+    def staged_tree(self) -> str:
+        return FAKE_TREE
+
 
 class FakeRoaster:
     def __init__(self, result: RoastResult) -> None:
         self.result = result
         self.calls: list[tuple[Diff, SpiceLevel]] = []
 
-    def roast(self, diff: Diff, spice: SpiceLevel) -> RoastResult:
+    def roast(self, diff: Diff, spice: SpiceLevel) -> RoastOutcome:
         self.calls.append((diff, spice))
-        return self.result
+        return RoastOutcome(self.result, SAMPLE_USAGE)

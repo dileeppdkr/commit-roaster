@@ -135,6 +135,32 @@ def test_exclude_files_passes_non_git_text_through(text: str) -> None:
     assert exclude_files(text, ["*.txt"]) == text
 
 
+def test_load_lists_files_cut_off_entirely() -> None:
+    second = SAMPLE_DIFF.replace("app.py", "tests/test_app.py")
+    third = SAMPLE_DIFF.replace("app.py", "README.md")
+    piped = SAMPLE_DIFF + second + third
+    first_line_of_second = len(second.splitlines(keepends=True)[0])
+    cut = len(SAMPLE_DIFF) + first_line_of_second + 5
+    diff = StdinDiffSource(io.StringIO(piped)).load(max_chars=cut)
+    # The second file is partly shown, so only the third is listed as omitted.
+    assert diff.omitted_files == ("README.md",)
+
+
+def test_cut_before_a_files_first_line_omits_it() -> None:
+    second = SAMPLE_DIFF.replace("app.py", "tests/test_app.py")
+    diff = StdinDiffSource(io.StringIO(SAMPLE_DIFF + second)).load(len(SAMPLE_DIFF) + 5)
+    assert diff.omitted_files == ("tests/test_app.py",)
+
+
+def test_load_redacts_secrets_before_truncating() -> None:
+    aws_key = "AKIA" + "Q" * 16  # built at runtime so this file holds no key-like text
+    piped = SAMPLE_DIFF + f"+KEY = '{aws_key}'\n"
+    diff = StdinDiffSource(io.StringIO(piped)).load(max_chars=10_000)
+    assert aws_key not in diff.text
+    assert [(r.path, r.kind) for r in diff.redactions] == [("app.py", "AWS access key")]
+    assert diff.omitted_files == ()
+
+
 def test_load_truncates_large_diff() -> None:
     diff = StdinDiffSource(io.StringIO(SAMPLE_DIFF)).load(max_chars=50)
     assert diff.truncated

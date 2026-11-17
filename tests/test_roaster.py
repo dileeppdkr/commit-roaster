@@ -16,7 +16,7 @@ from commit_roaster.exceptions import (
     RoastIncompleteError,
     RoastRefusedError,
 )
-from commit_roaster.models import RoastResult, SpiceLevel
+from commit_roaster.models import RoastResult, SpiceLevel, TokenUsage
 from commit_roaster.roaster import FALLBACK_BETA, Roaster
 
 _REQUEST = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
@@ -61,9 +61,10 @@ def test_roast_sends_expected_request(sample_diff: Diff, sample_result: RoastRes
     client, messages = _client(_response(sample_result))
     settings = Settings(model="claude-opus-5-5", effort="high")
 
-    result = Roaster(client, settings).roast(sample_diff, SpiceLevel.SAVAGE)
+    outcome = Roaster(client, settings).roast(sample_diff, SpiceLevel.SAVAGE)
 
-    assert result == sample_result
+    assert outcome.result == sample_result
+    assert outcome.usage == TokenUsage(model="claude-opus-5-5", input_tokens=100, output_tokens=50)
     kwargs = messages.kwargs
     assert kwargs["model"] == "claude-opus-5-5"
     assert kwargs["output_format"] is RoastResult

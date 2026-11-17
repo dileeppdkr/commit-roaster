@@ -27,6 +27,24 @@ def test_user_message_flags_truncation() -> None:
     diff = Diff(text="abc\n", description="staged changes", original_chars=5_000)
     message = PromptBuilder(SpiceLevel.MEDIUM).user_message(diff)
     assert "cut from 5,000 to 4 characters" in message
+    assert "not shown at all" not in message
+    assert "Do not raise issues about code you cannot see" in message
+
+
+def test_user_message_lists_omitted_files_up_to_a_limit() -> None:
+    names = tuple(f"tests/test_{n}.py" for n in range(45))
+    diff = Diff(text="abc\n", description="staged", original_chars=9_000, omitted_files=names)
+    message = PromptBuilder(SpiceLevel.MEDIUM).user_message(diff)
+    assert "not shown at all: tests/test_0.py, tests/test_1.py," in message
+    assert "tests/test_39.py and 5 more." in message
+    assert "tests/test_40.py" not in message
+
+
+def test_system_prompt_asks_for_concrete_issues() -> None:
+    prompt = PromptBuilder(SpiceLevel.SAVAGE).system_prompt()
+    assert "concrete failure" in prompt
+    assert "[REDACTED AWS access key]" in prompt
+    assert "just because you don't recognize it" in prompt
 
 
 def test_commit_message_with_body(sample_result: RoastResult) -> None:

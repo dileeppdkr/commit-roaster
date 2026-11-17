@@ -179,6 +179,34 @@ def test_missing_executable_raises() -> None:
         GitClient(executable="definitely-not-git-xyz").diff()
 
 
+def test_commit_tells_hooks_it_was_roasted(git_repo: Path) -> None:
+    hook = git_repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text('#!/bin/sh\necho "flag=$COMMIT_ROASTER_IN_COMMIT" > "$PWD/.hook-env"\n')
+    hook.chmod(0o755)
+    _stage(git_repo, "a.txt", "a\n")
+    client = GitClient(git_repo)
+    staged = client.staged_tree()
+    client.commit("Add a.txt\n")
+    committed = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=git_repo, capture_output=True, text=True
+    ).stdout.strip()
+    # The hook is told exactly which tree was roasted: the one that got committed.
+    assert (git_repo / ".hook-env").read_text() == f"flag={staged}\n"
+    assert staged == committed
+
+
+def test_commit_has_no_time_limit(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    GitClient(git_repo, timeout=1).commit("x\n")
+    assert seen["timeout"] is None
+
+
 def test_ensure_repository_reports_missing_git_as_such() -> None:
     with pytest.raises(GitError, match="Could not find") as caught:
         GitClient(executable="definitely-not-git-xyz").ensure_repository()

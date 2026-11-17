@@ -1,21 +1,22 @@
 """Where the diff comes from.
 
 :class:`DiffSource` is a template: subclasses only say how to read the raw
-text, and the base class handles the shared rules (empty check, size limit).
+text, and the base class handles the shared rules (empty check, secret
+redaction, size limit).
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from typing import TextIO
 
 from commit_roaster.exceptions import ConfigError, EmptyDiffError
 from commit_roaster.git import GitClient
+from commit_roaster.patch import path_matches, split_sections
+from commit_roaster.redact import Redaction, redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,10 @@ class Diff:
     text: str
     description: str
     original_chars: int
+    # Files changed in the full diff whose section was cut off entirely by the size limit.
+    omitted_files: tuple[str, ...] = ()
+    # Credentials replaced with [REDACTED ...] markers before anything is sent.
+    redactions: tuple[Redaction, ...] = ()
 
     @property
     def truncated(self) -> bool:
@@ -42,70 +47,6 @@ def truncate_at_line(text: str, limit: int) -> str:
     return cut[: last_newline + 1] if last_newline > 0 else cut
 
 
-_FILE_HEADER = "diff --git "
-_QUOTED = r'"(?:[^"\\]|\\.)*"'
-_HEADER_PATHS = (
-    re.compile(r"^diff --git (a/.+) (b/.+)$"),
-    # git quotes names with special or non-ASCII characters: "a/caf\303\251.lock"
-    re.compile(rf"^diff --git ({_QUOTED}) ({_QUOTED})$"),
-)
-# (line prefix, path prefix git puts in front of the name)
-_PATH_LINES = (
-    ("--- ", "a/"),
-    ("+++ ", "b/"),
-    ("rename from ", ""),
-    ("rename to ", ""),
-    ("copy from ", ""),
-    ("copy to ", ""),
-)
-
-
-def _unquote(name: str) -> str:
-    """Undo git's C-style quoting (``\\t``, ``\\"``, octal UTF-8 bytes) if present."""
-    if len(name) < 2 or not (name.startswith('"') and name.endswith('"')):
-        return name
-    try:
-        raw = name[1:-1].encode("utf-8").decode("unicode_escape").encode("latin-1")
-    except UnicodeError:
-        return name
-    return raw.decode("utf-8", errors="replace")
-
-
-def _strip_prefix(name: str, prefix: str) -> str | None:
-    name = _unquote(name)
-    return name[len(prefix) :] if name.startswith(prefix) else None
-
-
-def _path_matches(path: str, patterns: Sequence[str]) -> bool:
-    """Approximate git's default pathspec rules: ``*`` also matches ``/``, and a
-    plain name matches that path or anything under it."""
-    for pattern in patterns:
-        directory = pattern.rstrip("/")
-        if fnmatchcase(path, pattern) or path.startswith(f"{directory}/"):
-            return True
-    return False
-
-
-def _section_paths(lines: Sequence[str]) -> set[str]:
-    """Every path named in one ``diff --git`` section's header lines."""
-    candidates: set[str | None] = set()
-    header = lines[0].rstrip("\r\n")
-    for pattern in _HEADER_PATHS:
-        if match := pattern.match(header):
-            a_name, b_name = match.groups()
-            candidates.add(_strip_prefix(a_name, "a/"))
-            candidates.add(_strip_prefix(b_name, "b/"))
-    for line in lines[1:]:
-        if line.startswith("@@"):
-            break  # hunks start here; anything below is file content, not headers
-        for line_prefix, path_prefix in _PATH_LINES:
-            if line.startswith(line_prefix):
-                # git appends a tab to ---/+++ names that contain spaces
-                name = line[len(line_prefix) :].rstrip("\r\n").removesuffix("\t")
-                candidates.add(_strip_prefix(name, path_prefix))
-    return {path for path in candidates if path}
-
-
 def exclude_files(diff_text: str, patterns: Sequence[str]) -> str:
     """Drop the per-file sections of a git diff whose path matches any pattern.
 
@@ -115,21 +56,23 @@ def exclude_files(diff_text: str, patterns: Sequence[str]) -> str:
     """
     if not patterns:
         return diff_text
-    sections: list[list[str]] = [[]]
-    for line in diff_text.splitlines(keepends=True):
-        if line.startswith((_FILE_HEADER, "commit ")):
-            sections.append([])
-        sections[-1].append(line)
-    kept = [
-        section
-        for section in sections
-        if not (
-            section
-            and section[0].startswith(_FILE_HEADER)
-            and any(_path_matches(path, patterns) for path in _section_paths(section))
-        )
-    ]
-    return "".join(line for section in kept for line in section)
+    return "".join(
+        section.text
+        for section in split_sections(diff_text)
+        if not (section.is_file and any(path_matches(p, patterns) for p in section.paths))
+    )
+
+
+def files_after(diff_text: str, kept_chars: int) -> tuple[str, ...]:
+    """Names of the files whose section starts at or after ``kept_chars``,
+    i.e. the files a cut at that point leaves out completely."""
+    omitted: list[str] = []
+    offset = 0
+    for section in split_sections(diff_text):
+        if offset >= kept_chars and section.is_file and section.name:
+            omitted.append(section.name)
+        offset += len(section.text)
+    return tuple(omitted)
 
 
 class DiffSource(ABC):
@@ -154,8 +97,16 @@ class DiffSource(ABC):
         if not raw.strip():
             message = f"Nothing to roast in the {self.description}."
             raise EmptyDiffError(f"{message} {self.empty_hint}".strip())
+        # Redact first, so no secret can survive into the text that is sent.
+        raw, redactions = redact_secrets(raw)
         text = truncate_at_line(raw, max_chars)
-        diff = Diff(text=text, description=self.description, original_chars=len(raw))
+        diff = Diff(
+            text=text,
+            description=self.description,
+            original_chars=len(raw),
+            omitted_files=files_after(raw, len(text)) if len(text) < len(raw) else (),
+            redactions=redactions,
+        )
         if diff.truncated:
             logger.info("Diff truncated from %d to %d characters", len(raw), len(text))
         return diff

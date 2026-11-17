@@ -7,12 +7,13 @@ import textwrap
 from abc import ABC, abstractmethod
 
 from commit_roaster.diff import Diff
-from commit_roaster.models import RoastResult
+from commit_roaster.models import RoastResult, TokenUsage
+from commit_roaster.pricing import describe_usage, estimate_cost
 
 
 class Renderer(ABC):
     @abstractmethod
-    def render(self, result: RoastResult, diff: Diff) -> str:
+    def render(self, result: RoastResult, diff: Diff, usage: TokenUsage | None = None) -> str:
         """Return the full output for one roast."""
 
 
@@ -30,7 +31,7 @@ class TextRenderer(Renderer):
         self._color = color
         self._width = width
 
-    def render(self, result: RoastResult, diff: Diff) -> str:
+    def render(self, result: RoastResult, diff: Diff, usage: TokenUsage | None = None) -> str:
         score = self._paint(f"{result.cringe_score}/10", self._score_color(result.cringe_score))
         lines = [
             self._heading(f"The roast  (cringe score: {score})"),
@@ -57,6 +58,9 @@ class TextRenderer(Renderer):
                     self._DIM,
                 )
             )
+        if usage is not None:
+            lines.append("")
+            lines.append(self._paint(describe_usage(usage), self._DIM))
         return "\n".join(lines)
 
     def _heading(self, text: str) -> str:
@@ -76,8 +80,8 @@ class TextRenderer(Renderer):
 class JsonRenderer(Renderer):
     """Machine-readable output for scripts and editor integrations."""
 
-    def render(self, result: RoastResult, diff: Diff) -> str:
-        payload = {
+    def render(self, result: RoastResult, diff: Diff, usage: TokenUsage | None = None) -> str:
+        payload: dict[str, object] = {
             **result.model_dump(),
             "commit_message": result.commit_message,
             "diff": {
@@ -85,6 +89,15 @@ class JsonRenderer(Renderer):
                 "truncated": diff.truncated,
                 "chars_reviewed": len(diff.text),
                 "chars_total": diff.original_chars,
+                "omitted_files": list(diff.omitted_files),
+                "redactions": [{"file": r.path, "kind": r.kind} for r in diff.redactions],
             },
         }
+        if usage is not None:
+            payload["usage"] = {
+                "model": usage.model,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "estimated_cost_usd": estimate_cost(usage),
+            }
         return json.dumps(payload, indent=2, ensure_ascii=False)

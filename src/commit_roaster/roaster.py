@@ -16,7 +16,7 @@ from commit_roaster.exceptions import (
     RoastIncompleteError,
     RoastRefusedError,
 )
-from commit_roaster.models import RoastResult, SpiceLevel
+from commit_roaster.models import RoastOutcome, RoastResult, SpiceLevel, TokenUsage
 from commit_roaster.prompts import PromptBuilder
 
 logger = logging.getLogger(__name__)
@@ -32,13 +32,13 @@ _AUTH_HELP = (
 
 
 class SupportsRoast(Protocol):
-    """Anything that can turn a diff into a :class:`RoastResult` (lets the CLI use fakes)."""
+    """Anything that can turn a diff into a :class:`RoastOutcome` (lets the CLI use fakes)."""
 
-    def roast(self, diff: Diff, spice: SpiceLevel) -> RoastResult: ...
+    def roast(self, diff: Diff, spice: SpiceLevel) -> RoastOutcome: ...
 
 
 class Roaster:
-    """Sends a diff to Claude and returns a validated :class:`RoastResult`."""
+    """Sends a diff to Claude and returns a validated :class:`RoastResult` and its usage."""
 
     def __init__(self, client: anthropic.Anthropic, settings: Settings) -> None:
         self._client = client
@@ -49,7 +49,7 @@ class Roaster:
         """Create a roaster with a default client (credentials come from the environment)."""
         return cls(anthropic.Anthropic(max_retries=3), settings)
 
-    def roast(self, diff: Diff, spice: SpiceLevel) -> RoastResult:
+    def roast(self, diff: Diff, spice: SpiceLevel) -> RoastOutcome:
         prompts = PromptBuilder(spice)
         try:
             response = self._client.beta.messages.parse(
@@ -103,4 +103,9 @@ class Roaster:
         result = response.parsed_output
         if result is None:
             raise RoastIncompleteError("Claude returned an empty reply.")
-        return result
+        usage = TokenUsage(
+            model=response.model,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
+        return RoastOutcome(result=result, usage=usage)

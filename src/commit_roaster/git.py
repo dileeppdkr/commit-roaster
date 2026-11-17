@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from commit_roaster.exceptions import GitCommandError, GitError, NotAGitRepositoryError
@@ -13,6 +14,9 @@ from commit_roaster.exceptions import GitCommandError, GitError, NotAGitReposito
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_SECONDS = 30.0
+# Set to the staged tree id while `roast --commit` runs `git commit`, so the roast
+# pre-commit hook can skip that exact change (and only that one).
+IN_COMMIT_ENV = "COMMIT_ROASTER_IN_COMMIT"
 
 
 class GitClient:
@@ -66,11 +70,28 @@ class GitClient:
         args.extend(f":(top,exclude){pattern}" for pattern in exclude_patterns)
         return self._run(*args)
 
-    def commit(self, message: str) -> str:
-        """Commit the staged changes with ``message``; returns git's summary output."""
-        return self._run("commit", "--file", "-", input_text=message)
+    def staged_tree(self) -> str:
+        """The id of the tree the staged changes would commit (``git write-tree``)."""
+        return self._run("write-tree").strip()
 
-    def _run(self, *args: str, input_text: str | None = None) -> str:
+    def commit(self, message: str) -> str:
+        """Commit the staged changes with ``message``; returns git's summary output.
+
+        The repository's hooks run as usual and can be slow (pre-commit may install
+        tools first), so there is no time limit: killing git mid-commit can leave
+        ``.git/index.lock`` behind. Hooks see ``COMMIT_ROASTER_IN_COMMIT`` set to the
+        staged tree id, so a roast hook can tell that this exact change was roasted.
+        """
+        env = {**os.environ, IN_COMMIT_ENV: self.staged_tree()}
+        return self._run("commit", "--file", "-", input_text=message, env=env, time_limit=False)
+
+    def _run(
+        self,
+        *args: str,
+        input_text: str | None = None,
+        env: Mapping[str, str] | None = None,
+        time_limit: bool = True,
+    ) -> str:
         executable = shutil.which(self._executable)
         if executable is None:
             raise GitError(f"Could not find the {self._executable!r} executable on PATH.")
@@ -83,7 +104,8 @@ class GitClient:
                 input=input_text,
                 capture_output=True,
                 text=True,
-                timeout=self._timeout,
+                env=env,
+                timeout=self._timeout if time_limit else None,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:

@@ -18,8 +18,8 @@ from commit_roaster.diff import (
     StagedDiffSource,
     StdinDiffSource,
 )
-from commit_roaster.exceptions import CommitRoasterError, ConfigError, ExitCode
-from commit_roaster.git import GitClient
+from commit_roaster.exceptions import CommitRoasterError, ConfigError, ExitCode, GitError
+from commit_roaster.git import IN_COMMIT_ENV, GitClient
 from commit_roaster.models import SUBJECT_MAX_CHARS, RoastResult, SpiceLevel
 from commit_roaster.render import JsonRenderer, Renderer, TextRenderer
 from commit_roaster.roaster import Roaster, SupportsRoast
@@ -71,6 +71,11 @@ class CommitRoasterCLI:
     # ------------------------------------------------------------------ public
 
     def run(self, argv: Sequence[str] | None = None) -> int:
+        if self._already_roasted():
+            # We are the pre-commit hook inside `roast --commit`, which has already
+            # roasted this exact change. Don't pay for a second roast.
+            self._print_err("roast: skipped, `roast --commit` already roasted this commit.")
+            return ExitCode.OK
         try:
             args = self._parse_args(argv)
         except SystemExit as exc:  # argparse exits on --help, --version and bad usage
@@ -187,15 +192,38 @@ class CommitRoasterCLI:
                 f"warning: diff is {diff.original_chars:,} characters; only the first "
                 f"{len(diff.text):,} will be reviewed (raise with --max-diff-chars)."
             )
+        if diff.redactions:
+            self._warn_about_secrets(diff)
         if not args.json and self._is_tty(self._stderr):
             self._print_err(f"Roasting {diff.description} with {settings.model}...")
 
-        result = self._roaster_factory(settings).roast(diff, SpiceLevel(args.spice))
-        self._print_out(self._renderer(args).render(result, diff))
+        outcome = self._roaster_factory(settings).roast(diff, SpiceLevel(args.spice))
+        self._print_out(self._renderer(args).render(outcome.result, diff, outcome.usage))
 
         if args.commit:
-            self._commit(git, result, diff, assume_yes=args.yes)
+            self._commit(git, outcome.result, diff, assume_yes=args.yes)
         return ExitCode.OK
+
+    def _already_roasted(self) -> bool:
+        """True only inside `roast --commit`, for the very change it roasted. Comparing
+        tree ids means a leftover `export COMMIT_ROASTER_IN_COMMIT=...` never turns
+        roasting off."""
+        marker = self._env.get(IN_COMMIT_ENV)
+        if not marker:
+            return False
+        try:
+            return self._git_factory().staged_tree() == marker
+        except GitError:
+            return False
+
+    def _warn_about_secrets(self, diff: Diff) -> None:
+        lines = ["warning: possible secrets found; they were replaced before sending:"]
+        lines.extend(
+            f"  {redaction.path or '(outside any file)'}: {redaction.kind}"
+            for redaction in diff.redactions
+        )
+        lines.append("Check that no real credential is about to be committed.")
+        self._print_err("\n".join(lines))
 
     def _build_source(
         self, args: argparse.Namespace, git: GitClient, settings: Settings

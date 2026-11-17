@@ -10,7 +10,7 @@ from commit_roaster.config import Settings
 from commit_roaster.exceptions import ExitCode
 from commit_roaster.models import RoastResult, SpiceLevel
 from commit_roaster.roaster import SupportsRoast
-from tests.fakes import SAMPLE_DIFF, FakeGit, FakeRoaster
+from tests.fakes import FAKE_TREE, SAMPLE_DIFF, FakeGit, FakeRoaster
 
 
 class TtyStringIO(io.StringIO):
@@ -97,6 +97,35 @@ def test_empty_diff_exit_code(sample_result: RoastResult) -> None:
     harness = Harness(sample_result, git=FakeGit(diff_text=""))
     assert harness.run() == ExitCode.NOTHING_TO_ROAST
     assert "Nothing to roast" in harness.stderr.getvalue()
+
+
+def test_hook_inside_roast_commit_skips(sample_result: RoastResult) -> None:
+    harness = Harness(sample_result, env={"COMMIT_ROASTER_IN_COMMIT": FAKE_TREE})
+    assert harness.run("--exit-zero") == ExitCode.OK
+    assert harness.roaster.calls == []  # no second, paid roast
+    assert "already roasted" in harness.stderr.getvalue()
+
+
+@pytest.mark.parametrize("stale", ["1", "0000000000000000000000000000000000000000"])
+def test_stale_marker_does_not_disable_roasting(sample_result: RoastResult, stale: str) -> None:
+    harness = Harness(sample_result, env={"COMMIT_ROASTER_IN_COMMIT": stale})
+    assert harness.run() == ExitCode.OK
+    assert len(harness.roaster.calls) == 1
+
+
+def test_secrets_are_redacted_and_reported(sample_result: RoastResult) -> None:
+    aws_key = "AKIA" + "Q" * 16  # built at runtime so this file holds no key-like text
+    harness = Harness(sample_result, git=FakeGit(diff_text=SAMPLE_DIFF + f"+k = '{aws_key}'\n"))
+    assert harness.run() == ExitCode.OK
+    sent, _ = harness.roaster.calls[0]
+    assert aws_key not in sent.text
+    assert "app.py: AWS access key" in harness.stderr.getvalue()
+
+
+def test_output_ends_with_cost(sample_result: RoastResult) -> None:
+    harness = Harness(sample_result)
+    harness.run()
+    assert harness.stdout.getvalue().rstrip().endswith("tokens on claude-haiku-5-5)")
 
 
 def test_exclude_flags_reach_git(sample_result: RoastResult) -> None:

@@ -7,6 +7,7 @@ import pytest
 from commit_roaster.diff import Diff
 from commit_roaster.models import RoastResult
 from commit_roaster.render import JsonRenderer, TextRenderer
+from tests.fakes import SAMPLE_USAGE
 
 
 def test_text_renderer_plain(sample_result: RoastResult, sample_diff: Diff) -> None:
@@ -45,4 +46,26 @@ def test_json_renderer(sample_result: RoastResult, sample_diff: Diff) -> None:
         "truncated": False,
         "chars_reviewed": len(sample_diff.text),
         "chars_total": len(sample_diff.text),
+        "omitted_files": [],
+        "redactions": [],
     }
+    assert "usage" not in payload
+
+
+def test_json_renderer_includes_usage_and_cost(
+    sample_result: RoastResult, sample_diff: Diff
+) -> None:
+    payload = json.loads(JsonRenderer().render(sample_result, sample_diff, SAMPLE_USAGE))
+    assert payload["usage"] == {
+        "model": "claude-haiku-5-5",
+        "input_tokens": 1_200,
+        "output_tokens": 300,
+        "estimated_cost_usd": pytest.approx(0.00027),
+    }
+
+
+def test_text_renderer_shows_cost(sample_result: RoastResult, sample_diff: Diff) -> None:
+    output = TextRenderer().render(sample_result, sample_diff, SAMPLE_USAGE)
+    assert output.endswith(
+        "Cost: about $0.0003 (1,200 input + 300 output tokens on claude-haiku-5-5)"
+    )

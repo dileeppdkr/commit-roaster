@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -72,3 +73,20 @@ class RoastResult(BaseModel):
         if self.commit_body:
             return f"{self.commit_subject}\n\n{self.commit_body}\n"
         return f"{self.commit_subject}\n"
+
+
+@dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """What one API call used, as reported by the API."""
+
+    model: str  # the model that answered (a refusal fallback can differ from the one asked)
+    input_tokens: int
+    output_tokens: int  # includes thinking tokens, which are billed as output
+
+
+@dataclass(frozen=True, slots=True)
+class RoastOutcome:
+    """A roast plus what it cost to make."""
+
+    result: RoastResult
+    usage: TokenUsage | None = None

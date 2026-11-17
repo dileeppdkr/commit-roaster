@@ -86,7 +86,8 @@ pre-commit:
 Everyone who commits needs `ANTHROPIC_API_KEY` set. Without it, they see an error and the
 commit still goes through. Every commit makes one API call. To skip one, use
 `SKIP=roast git commit ...` with pre-commit, `HUSKY=0` with husky, or `LEFTHOOK=0` with
-lefthook.
+lefthook. `roast --commit` doesn't trigger a second roast: the hook sees that the commit
+came from `roast` and skips.
 
 ## Usage
 
@@ -164,9 +165,25 @@ export ROAST_EXCLUDE='app/assets/builds,coverage'
 
 ### Cost
 
-Each run makes one API call. Cost grows with diff size. On the default `claude-haiku-5-5`
-at `low` effort, even a maximum-size diff costs well under a cent. For sharper roasts, try
-`--model claude-sonnet-5-5` or `claude-opus-5-5` (roughly 20 to 40 times the price).
+Each run makes one API call and ends with what it cost, estimated from list prices:
+
+```text
+Cost: about $0.0019 (14,210 input + 912 output tokens on claude-haiku-5-5)
+```
+
+`--json` output has the same numbers under `usage`. Cost grows with diff size. On the
+default `claude-haiku-5-5` at `low` effort, even a maximum-size diff costs well under a
+cent. For sharper roasts, try `--model claude-sonnet-5-5` or `claude-opus-5-5` (roughly
+20 to 40 times the price).
+
+### Secrets stay on your machine
+
+Before anything is sent, `roast` replaces credentials in the diff with markers such as
+`[REDACTED AWS access key]`. It catches Anthropic, OpenAI, AWS, GitHub, Slack, Stripe
+and Google keys, private key blocks, and every value in `.env` files (not in
+`.env.example`). You get a warning naming the file, and Claude still lists the secret
+as an issue without ever seeing it. This catches common key formats only, so it doesn't
+replace a real secret scanner.
 
 ## How it works
 
@@ -176,7 +193,7 @@ passed in, so every part can be tested on its own.
 ```text
 cli.CommitRoasterCLI        parses flags, wires everything up, maps errors to exit codes
  ├─ config.Settings         immutable settings: defaults → env vars → flags
- ├─ diff.DiffSource (ABC)   where the diff comes from (template method)
+ ├─ diff.DiffSource (ABC)   where the diff comes from; redacts secrets (template method)
  │   ├─ StagedDiffSource
  │   ├─ RevisionRangeDiffSource
  │   └─ StdinDiffSource
@@ -197,8 +214,11 @@ A few decisions worth knowing:
   Haiku models have no fallback, so a declined diff gives the error right away.
 - **Prompt injection.** The diff is wrapped in `<diff>` tags and the system prompt tells
   Claude to treat anything inside as code to review, not as instructions.
-- **No silent truncation.** Oversized diffs are cut at a line boundary, you get a warning,
-  and Claude is told that it only saw part of the change.
+- **No silent truncation.** Oversized diffs are cut at a line boundary, and you get a
+  warning. Claude is told which files it didn't see, and not to raise issues about them.
+- **Concrete issues only.** Each issue must name a file and a real failure. Style
+  opinions and "should be checked" remarks are left out, and a clean change gets an
+  empty list.
 - **Expected errors vs bugs.** Expected failures raise a `CommitRoasterError` subclass and
   become a one-line message plus an exit code. Anything else shows a full traceback,
   because it's a bug.
@@ -227,11 +247,14 @@ make test       # pytest with coverage (fails under 90%)
 src/commit_roaster/
   cli.py         entry point and wiring
   config.py      Settings
-  diff.py        DiffSource classes
+  diff.py        DiffSource classes (empty check, redaction, size limit)
+  patch.py       splits git's diff format into per-file sections
+  redact.py      replaces credentials before anything is sent
   git.py         GitClient
-  models.py      SpiceLevel, RoastResult
+  models.py      SpiceLevel, RoastResult, TokenUsage
   prompts.py     PromptBuilder
   roaster.py     Roaster (Claude API)
+  pricing.py     cost estimate from list prices
   render.py      TextRenderer, JsonRenderer
   exceptions.py  error types and exit codes
 tests/           one test module per source module
