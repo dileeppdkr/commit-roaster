@@ -234,3 +234,30 @@ def test_os_error_raises_git_error(monkeypatch: pytest.MonkeyPatch, git_repo: Pa
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(GitError, match="Could not run git"):
         GitClient(git_repo).diff()
+
+
+def test_grep_falls_back_without_pcre(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+    flavors: list[str] = []
+    real_run = GitClient._run
+
+    def fake_run(self: GitClient, *args: str, **kwargs: object) -> str:
+        if args[0] == "grep":
+            flavor = next(arg for arg in args if arg in {"-P", "-E"})
+            flavors.append(flavor)
+            if flavor == "-P":
+                raise GitCommandError("git grep failed (exit 128): fatal: ... USE_LIBPCRE")
+        return real_run(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(GitClient, "_run", fake_run)
+    _stage(git_repo, "a.py", "value = 1\n")
+    client = GitClient(git_repo)
+    assert client.grep("value") == [("a.py", 1, "value = 1")]
+    assert client.grep("value") == [("a.py", 1, "value = 1")]
+    assert flavors == ["-P", "-E", "-E"]  # PCRE is tried once, then remembered as missing
+
+
+def test_ls_files_lists_whole_repo_from_a_subfolder(git_repo: Path) -> None:
+    (git_repo / "sub").mkdir()
+    _stage(git_repo, "top.py", "x\n")
+    _stage(git_repo, "sub/inner.py", "y\n")
+    assert GitClient(git_repo / "sub").ls_files() == ["sub/inner.py", "top.py"]

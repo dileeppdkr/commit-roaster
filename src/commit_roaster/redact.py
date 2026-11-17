@@ -65,9 +65,10 @@ def _redact_tokens(line: str, found: set[str]) -> str:
     return line
 
 
-def _redact_lines(lines: tuple[str, ...], *, env_file: bool, found: set[str]) -> list[str]:
+def _redact_lines(
+    lines: tuple[str, ...], *, env_file: bool, found: set[str], in_hunk: bool = False
+) -> list[str]:
     out: list[str] = []
-    in_hunk = False
     in_key = False
     for line in lines:
         if line.startswith("@@"):
@@ -90,6 +91,16 @@ def _redact_lines(lines: tuple[str, ...], *, env_file: bool, found: set[str]) ->
             found.add(_ENV_VALUES)
         out.append(_redact_tokens(line, found))
     return out
+
+
+def redact_file(path: str, text: str) -> tuple[str, tuple[Redaction, ...]]:
+    """Like :func:`redact_secrets`, for a plain file's contents rather than a diff."""
+    found: set[str] = set()
+    # Mark every line as diff context, so the diff rules apply line by line.
+    lines = tuple(f" {line}" for line in text.splitlines(keepends=True))
+    out = _redact_lines(lines, env_file=_is_env_file(path), found=found, in_hunk=True)
+    redacted = "".join(line[1:] for line in out)
+    return redacted, tuple(Redaction(path, kind) for kind in sorted(found))
 
 
 def redact_secrets(diff_text: str) -> tuple[str, tuple[Redaction, ...]]:

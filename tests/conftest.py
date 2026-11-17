@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from commit_roaster.diff import Diff
-from commit_roaster.models import RoastResult
+from commit_roaster.models import Issue, ReviewFocus, RoastResult, Severity
 from tests.fakes import SAMPLE_DIFF
 
 
@@ -20,7 +20,15 @@ def sample_result() -> RoastResult:
     return RoastResult(
         roast="A print statement named DEBUG. Bold of you to ship your diary.",
         cringe_score=6,
-        issues=["Leftover debug print in add()."],
+        issues=[
+            Issue(
+                file="app.py",
+                line=2,
+                category=ReviewFocus.BUGS,
+                severity=Severity.MEDIUM,
+                problem="Leftover debug print in add() spams stdout on every call; remove it.",
+            )
+        ],
         commit_subject="Add debug logging to add()",
         commit_body="Prints both operands so the sum can be traced.",
     )

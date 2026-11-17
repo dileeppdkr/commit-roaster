@@ -7,10 +7,16 @@ import logging
 import os
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import TextIO
 
 from commit_roaster import __version__
-from commit_roaster.config import EFFORT_LEVELS, Settings, parse_positive_int
+from commit_roaster.config import (
+    DEFAULT_RULES_FILE,
+    EFFORT_LEVELS,
+    Settings,
+    parse_positive_int,
+)
 from commit_roaster.diff import (
     Diff,
     DiffSource,
@@ -20,12 +26,21 @@ from commit_roaster.diff import (
 )
 from commit_roaster.exceptions import CommitRoasterError, ConfigError, ExitCode, GitError
 from commit_roaster.git import IN_COMMIT_ENV, GitClient
-from commit_roaster.models import SUBJECT_MAX_CHARS, RoastResult, SpiceLevel
+from commit_roaster.models import SUBJECT_MAX_CHARS, ReviewPlan, RoastResult, SpiceLevel
+from commit_roaster.patch import split_sections
+from commit_roaster.redact import Redaction, redact_file
 from commit_roaster.render import JsonRenderer, Renderer, TextRenderer
 from commit_roaster.roaster import Roaster, SupportsRoast
+from commit_roaster.stack import detect_stacks
+from commit_roaster.tools import RepoTools
 
-RoasterFactory = Callable[[Settings], SupportsRoast]
+RoasterFactory = Callable[[Settings, RepoTools | None], SupportsRoast]
 GitFactory = Callable[[], GitClient]
+ToolsFactory = Callable[[GitClient], RepoTools]
+
+# Team rules longer than this are cut, so a huge file can't blow up every request.
+_MAX_RULES_CHARS = 20_000
+_MAX_DETECTION_FILE_BYTES = 200_000
 
 _EPILOG = """\
 examples:
@@ -34,6 +49,18 @@ examples:
   roast --range HEAD~3..HEAD    roast the last three commits
   git show | roast --stdin      roast any diff you can pipe in
   roast --commit                roast, then commit with the suggested message
+  roast --focus security,sql    review only for security and SQL problems
+  roast --deep --focus reuse,side-effects
+                                let Claude read the codebase to find duplicated
+                                helpers and broken callers
+
+focus areas (--focus, comma-separated or repeated; default: all):
+  bugs, security, sql, performance (N+1 and friends), side-effects, patterns,
+  reuse, best-practices, tests. side-effects, patterns and reuse need --deep.
+
+team rules:
+  Put your team's review rules in .roast.md at the repository root and every
+  review applies them. Use --rules FILE for another file, --no-rules to skip.
 """
 
 
@@ -59,6 +86,7 @@ class CommitRoasterCLI:
         stderr: TextIO | None = None,
         git_factory: GitFactory = GitClient,
         roaster_factory: RoasterFactory = Roaster.from_settings,
+        tools_factory: ToolsFactory = RepoTools.for_repository,
         env: dict[str, str] | None = None,
     ) -> None:
         self._stdin = stdin if stdin is not None else sys.stdin
@@ -66,6 +94,7 @@ class CommitRoasterCLI:
         self._stderr = stderr if stderr is not None else sys.stderr
         self._git_factory = git_factory
         self._roaster_factory = roaster_factory
+        self._tools_factory = tools_factory
         self._env = dict(os.environ) if env is None else env
 
     # ------------------------------------------------------------------ public
@@ -139,6 +168,12 @@ class CommitRoasterCLI:
             help="truncate larger diffs, with a warning (env: ROAST_MAX_DIFF_CHARS)",
         )
         parser.add_argument(
+            "--max-tokens",
+            type=_positive_int,
+            metavar="N",
+            help="cap on Claude's reply, thinking included, default 16000 (env: ROAST_MAX_TOKENS)",
+        )
+        parser.add_argument(
             "-x",
             "--exclude",
             action="append",
@@ -151,6 +186,42 @@ class CommitRoasterCLI:
             "--no-default-excludes",
             action="store_true",
             help="also send lock files, schema dumps, snapshots and vendored code",
+        )
+        review = parser.add_argument_group("what to review")
+        review.add_argument(
+            "--focus",
+            action="append",
+            default=[],
+            metavar="AREAS",
+            help="review only these areas, e.g. 'security,sql,performance' "
+            "(see the list below; env: ROAST_FOCUS)",
+        )
+        review.add_argument(
+            "--deep",
+            action="store_true",
+            default=None,
+            help="let Claude read and search the codebase with read-only tools; "
+            "slower and costs more (env: ROAST_DEEP)",
+        )
+        review.add_argument(
+            "--max-tool-calls",
+            type=_positive_int,
+            metavar="N",
+            help="limit for --deep, default 20 (env: ROAST_MAX_TOOL_CALLS)",
+        )
+        review.add_argument(
+            "--stack",
+            metavar="NAMES",
+            help="skip detection and use these stacks, e.g. 'rails,react' (env: ROAST_STACK)",
+        )
+        rules = review.add_mutually_exclusive_group()
+        rules.add_argument(
+            "--rules",
+            metavar="FILE",
+            help="team review rules to apply (default: .roast.md if present; env: ROAST_RULES)",
+        )
+        rules.add_argument(
+            "--no-rules", action="store_true", help="don't apply any team rules file"
         )
         parser.add_argument(
             "--exit-zero",
@@ -182,8 +253,14 @@ class CommitRoasterCLI:
             model=args.model,
             effort=args.effort,
             max_diff_chars=args.max_diff_chars,
+            max_tokens=args.max_tokens,
             exclude=args.exclude,
             default_excludes=False if args.no_default_excludes else None,
+            focus=args.focus,
+            deep=args.deep,
+            max_tool_calls=args.max_tool_calls,
+            stacks=args.stack,
+            rules_file="" if args.no_rules else args.rules,
         )
         git = self._git_factory()
         diff = self._build_source(args, git, settings).load(settings.max_diff_chars)
@@ -193,16 +270,121 @@ class CommitRoasterCLI:
                 f"{len(diff.text):,} will be reviewed (raise with --max-diff-chars)."
             )
         if diff.redactions:
-            self._warn_about_secrets(diff)
-        if not args.json and self._is_tty(self._stderr):
-            self._print_err(f"Roasting {diff.description} with {settings.model}...")
+            self._warn_about_secrets(diff.redactions, "they were replaced before sending")
 
-        outcome = self._roaster_factory(settings).roast(diff, SpiceLevel(args.spice))
+        root = self._repo_root(git)
+        plan = self._plan(settings, git, root, diff)
+        tools = None
+        if plan.deep:
+            if root is None:
+                raise ConfigError("--deep needs a git repository: it reads files from it.")
+            tools = self._tools_factory(git)
+        elif any(area.needs_codebase for area in plan.focus):
+            self._print_err(
+                "note: side-effects, patterns and reuse need the rest of the codebase; "
+                "add --deep to let Claude look at it."
+            )
+        if not args.json and self._is_tty(self._stderr):
+            self._print_err(self._progress_line(diff, settings, plan))
+
+        outcome = self._roaster_factory(settings, tools).roast(diff, SpiceLevel(args.spice), plan)
+        if tools is not None and tools.redactions:
+            self._warn_about_secrets(tools.redactions, "Claude saw them redacted")
         self._print_out(self._renderer(args).render(outcome.result, diff, outcome.usage))
 
         if args.commit:
             self._commit(git, outcome.result, diff, assume_yes=args.yes)
         return ExitCode.OK
+
+    def _plan(
+        self, settings: Settings, git: GitClient, root: Path | None, diff: Diff
+    ) -> ReviewPlan:
+        stacks = settings.stacks
+        if stacks is None:
+            stacks = self._detect_stacks(git, root, diff)
+        rules_file = settings.rules_file
+        if rules_file is None and DEFAULT_RULES_FILE in self._changed_files(diff):
+            # The change under review could rewrite its own rules ("never report
+            # security issues"), so a changed .roast.md is reviewed, not obeyed.
+            self._print_err(
+                f"note: {DEFAULT_RULES_FILE} is changed in this diff, so its rules were not "
+                f"applied. Pass --rules {DEFAULT_RULES_FILE} to apply them anyway."
+            )
+            rules_file = ""
+        return ReviewPlan(
+            focus=settings.focus,
+            stacks=stacks,
+            rules=self._load_rules(rules_file, root),
+            deep=settings.deep,
+            max_tool_calls=settings.max_tool_calls,
+        )
+
+    @staticmethod
+    def _changed_files(diff: Diff) -> set[str]:
+        """Every file the diff touches, including those cut off by the size limit."""
+        changed = set(diff.omitted_files)
+        for section in split_sections(diff.text):
+            changed |= section.paths
+        return changed
+
+    @staticmethod
+    def _repo_root(git: GitClient) -> Path | None:
+        try:
+            return git.toplevel()
+        except GitError:
+            return None  # e.g. `roast --stdin` outside any repository
+
+    @staticmethod
+    def _detect_stacks(git: GitClient, root: Path | None, diff: Diff) -> tuple[str, ...]:
+        if root is None:
+            # No repository: the file names in the diff are all we have.
+            names = [s.name for s in split_sections(diff.text) if s.name]
+            return detect_stacks(names, lambda _path: None)
+
+        def read(path: str) -> str | None:
+            try:
+                with (root / path).open("rb") as handle:
+                    return handle.read(_MAX_DETECTION_FILE_BYTES).decode("utf-8", "replace")
+            except OSError:
+                return None
+
+        return detect_stacks(git.ls_files(), read)
+
+    @staticmethod
+    def _load_rules(rules_file: str | None, root: Path | None) -> str | None:
+        """The team's review rules: an explicit file must exist, the default is optional."""
+        if rules_file == "":
+            return None
+        if rules_file is None:
+            if root is None or not (root / DEFAULT_RULES_FILE).is_file():
+                return None
+            path = root / DEFAULT_RULES_FILE
+        else:
+            candidates = [Path(rules_file)] + ([root / rules_file] if root else [])
+            found = next((c for c in candidates if c.is_file()), None)
+            if found is None:
+                raise ConfigError(f"Rules file {rules_file!r} not found.")
+            path = found
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise ConfigError(f"Could not read rules file {path}: {exc.strerror}") from exc
+        text, _ = redact_file(path.name, text[:_MAX_RULES_CHARS])
+        return text.strip() or None
+
+    @staticmethod
+    def _progress_line(diff: Diff, settings: Settings, plan: ReviewPlan) -> str:
+        details = []
+        if plan.focus:
+            details.append("focus: " + ", ".join(plan.focus))
+        if plan.stacks:
+            details.append("stack: " + ", ".join(plan.stacks))
+        if plan.rules:
+            details.append("team rules")
+        if plan.deep:
+            details.append(f"deep, up to {plan.max_tool_calls} tool calls")
+        suffix = f" ({'; '.join(details)})" if details else ""
+        return f"Roasting {diff.description} with {settings.model}{suffix}..."
 
     def _already_roasted(self) -> bool:
         """True only inside `roast --commit`, for the very change it roasted. Comparing
@@ -216,13 +398,13 @@ class CommitRoasterCLI:
         except GitError:
             return False
 
-    def _warn_about_secrets(self, diff: Diff) -> None:
-        lines = ["warning: possible secrets found; they were replaced before sending:"]
+    def _warn_about_secrets(self, redactions: Sequence[Redaction], what_happened: str) -> None:
+        lines = [f"warning: possible secrets found; {what_happened}:"]
         lines.extend(
-            f"  {redaction.path or '(outside any file)'}: {redaction.kind}"
-            for redaction in diff.redactions
+            f"  {path or '(outside any file)'}: {kind}"
+            for path, kind in dict.fromkeys((r.path, r.kind) for r in redactions)
         )
-        lines.append("Check that no real credential is about to be committed.")
+        lines.append("Check that no real credential is committed.")
         self._print_err("\n".join(lines))
 
     def _build_source(

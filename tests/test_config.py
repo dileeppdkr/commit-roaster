@@ -8,8 +8,10 @@ from commit_roaster.config import (
     DEFAULT_MODEL,
     Settings,
     parse_effort,
+    parse_focus,
 )
 from commit_roaster.exceptions import ConfigError
+from commit_roaster.models import ReviewFocus
 
 
 def test_defaults() -> None:
@@ -77,3 +79,55 @@ def test_with_overrides_skips_none() -> None:
 def test_invalid_settings_raise(kwargs: dict[str, object]) -> None:
     with pytest.raises(ConfigError):
         Settings(**kwargs)  # type: ignore[arg-type]
+
+
+def test_parse_focus() -> None:
+    assert parse_focus(["sql, Security", "sql"]) == (ReviewFocus.SQL, ReviewFocus.SECURITY)
+    assert parse_focus(["all"]) == tuple(ReviewFocus)
+    assert parse_focus([""]) == ()
+    with pytest.raises(ConfigError, match="Unknown focus 'style'"):
+        parse_focus(["style"])
+
+
+def test_review_settings_from_env() -> None:
+    settings = Settings.from_env(
+        {
+            "ROAST_FOCUS": "reuse,side-effects",
+            "ROAST_DEEP": "yes",
+            "ROAST_MAX_TOOL_CALLS": "8",
+            "ROAST_STACK": "rails",
+            "ROAST_RULES": "",
+            "ROAST_MAX_TOKENS": "4000",
+        }
+    )
+    assert settings.focus == (ReviewFocus.REUSE, ReviewFocus.SIDE_EFFECTS)
+    assert settings.deep is True
+    assert settings.max_tool_calls == 8
+    assert settings.stacks == ("rails",)
+    assert settings.rules_file == ""
+    assert settings.max_tokens == 4_000
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({"ROAST_DEEP": "maybe"}, "ROAST_DEEP must be true or false"),
+        ({"ROAST_MAX_TOOL_CALLS": "0"}, "ROAST_MAX_TOOL_CALLS must be greater than zero"),
+        ({"ROAST_MAX_TOKENS": "lots"}, "ROAST_MAX_TOKENS must be a whole number"),
+    ],
+)
+def test_bad_review_env(env: dict[str, str], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        Settings.from_env(env)
+
+
+def test_flags_override_review_settings() -> None:
+    settings = Settings.from_env({"ROAST_FOCUS": "sql"}).with_overrides(
+        focus=["tests"], deep=True, max_tool_calls=3, stacks="go", rules_file="R.md"
+    )
+    assert (settings.focus, settings.deep, settings.max_tool_calls) == (
+        (ReviewFocus.TESTS,),
+        True,
+        3,
+    )
+    assert (settings.stacks, settings.rules_file) == (("go",), "R.md")

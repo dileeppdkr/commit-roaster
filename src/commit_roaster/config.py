@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from typing import Literal, get_args
 
 from commit_roaster.exceptions import ConfigError
+from commit_roaster.models import ReviewFocus
+from commit_roaster.stack import parse_stacks
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 EFFORT_LEVELS: tuple[Effort, ...] = get_args(Effort)
@@ -86,7 +88,20 @@ DEFAULT_EXCLUDE_PATTERNS: tuple[str, ...] = (
 ENV_MODEL = "ROAST_MODEL"
 ENV_EFFORT = "ROAST_EFFORT"
 ENV_MAX_DIFF_CHARS = "ROAST_MAX_DIFF_CHARS"
+ENV_MAX_TOKENS = "ROAST_MAX_TOKENS"
 ENV_EXCLUDE = "ROAST_EXCLUDE"
+ENV_FOCUS = "ROAST_FOCUS"
+ENV_DEEP = "ROAST_DEEP"
+ENV_MAX_TOOL_CALLS = "ROAST_MAX_TOOL_CALLS"
+ENV_STACK = "ROAST_STACK"
+ENV_RULES = "ROAST_RULES"
+
+# Review rules are read from this file at the repository root when it exists.
+DEFAULT_RULES_FILE = ".roast.md"
+# Enough for a focused deep review; each call adds one round trip and some tokens.
+DEFAULT_MAX_TOOL_CALLS = 20
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
 
 
 def parse_effort(value: str) -> Effort:
@@ -129,6 +144,35 @@ def parse_patterns(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(patterns)
 
 
+def parse_focus(values: Iterable[str]) -> tuple[ReviewFocus, ...]:
+    """Comma-separated review areas (``--focus`` or ``ROAST_FOCUS``); ``all`` means every one."""
+    focus: list[ReviewFocus] = []
+    for value in values:
+        for raw in value.split(","):
+            name = raw.strip().lower()
+            if not name:
+                continue
+            if name == "all":
+                return tuple(ReviewFocus)
+            try:
+                area = ReviewFocus(name)
+            except ValueError:
+                choices = ", ".join([*ReviewFocus, "all"])
+                raise ConfigError(f"Unknown focus {name!r}. Choose from: {choices}.") from None
+            if area not in focus:
+                focus.append(area)
+    return tuple(focus)
+
+
+def parse_bool(value: str, name: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in _TRUE:
+        return True
+    if normalized in _FALSE:
+        return False
+    raise ConfigError(f"{name} must be true or false, got {value!r}.")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Immutable configuration for one run."""
@@ -139,6 +183,12 @@ class Settings:
     max_diff_chars: int = DEFAULT_MAX_DIFF_CHARS
     extra_excludes: tuple[str, ...] = ()
     default_excludes: bool = True
+    focus: tuple[ReviewFocus, ...] = ()  # empty: review everything
+    deep: bool = False
+    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS
+    stacks: tuple[str, ...] | None = None  # None: detect from the repository
+    # None: use .roast.md at the repository root if it exists; "": no rules file.
+    rules_file: str | None = None
 
     @property
     def exclude_patterns(self) -> tuple[str, ...]:
@@ -155,6 +205,8 @@ class Settings:
             raise ConfigError("max_tokens must be greater than zero.")
         if self.max_diff_chars <= 0:
             raise ConfigError("max_diff_chars must be greater than zero.")
+        if self.max_tool_calls <= 0:
+            raise ConfigError("max_tool_calls must be greater than zero.")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -169,8 +221,22 @@ class Settings:
             settings = replace(
                 settings, max_diff_chars=parse_positive_int(max_chars, ENV_MAX_DIFF_CHARS)
             )
+        if max_tokens := source.get(ENV_MAX_TOKENS, "").strip():
+            settings = replace(settings, max_tokens=parse_positive_int(max_tokens, ENV_MAX_TOKENS))
         if excludes := parse_patterns([source.get(ENV_EXCLUDE, "")]):
             settings = replace(settings, extra_excludes=excludes)
+        if focus := parse_focus([source.get(ENV_FOCUS, "")]):
+            settings = replace(settings, focus=focus)
+        if deep := source.get(ENV_DEEP, "").strip():
+            settings = replace(settings, deep=parse_bool(deep, ENV_DEEP))
+        if calls := source.get(ENV_MAX_TOOL_CALLS, "").strip():
+            settings = replace(
+                settings, max_tool_calls=parse_positive_int(calls, ENV_MAX_TOOL_CALLS)
+            )
+        if stacks := source.get(ENV_STACK, "").strip():
+            settings = replace(settings, stacks=parse_stacks(stacks))
+        if ENV_RULES in source:
+            settings = replace(settings, rules_file=source[ENV_RULES].strip())
         return settings
 
     def with_overrides(
@@ -179,8 +245,14 @@ class Settings:
         model: str | None = None,
         effort: str | None = None,
         max_diff_chars: int | None = None,
+        max_tokens: int | None = None,
         exclude: Iterable[str] = (),
         default_excludes: bool | None = None,
+        focus: Iterable[str] = (),
+        deep: bool | None = None,
+        max_tool_calls: int | None = None,
+        stacks: str | None = None,
+        rules_file: str | None = None,
     ) -> Settings:
         """Return a copy with any overrides applied (used for CLI flags).
 
@@ -193,8 +265,20 @@ class Settings:
             settings = replace(settings, effort=parse_effort(effort))
         if max_diff_chars is not None:
             settings = replace(settings, max_diff_chars=max_diff_chars)
+        if max_tokens is not None:
+            settings = replace(settings, max_tokens=max_tokens)
         if extra := parse_patterns(exclude):
             settings = replace(settings, extra_excludes=settings.extra_excludes + extra)
         if default_excludes is not None:
             settings = replace(settings, default_excludes=default_excludes)
+        if chosen := parse_focus(focus):
+            settings = replace(settings, focus=chosen)
+        if deep is not None:
+            settings = replace(settings, deep=deep)
+        if max_tool_calls is not None:
+            settings = replace(settings, max_tool_calls=max_tool_calls)
+        if stacks is not None:
+            settings = replace(settings, stacks=parse_stacks(stacks))
+        if rules_file is not None:
+            settings = replace(settings, rules_file=rules_file)
         return settings

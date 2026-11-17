@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from commit_roaster.redact import Redaction, redact_secrets
+from commit_roaster.redact import Redaction, redact_file, redact_secrets
 
 # Fake credentials are assembled at runtime so this file itself never contains
 # anything that looks like a real key (and roasting this repo doesn't flag it).
@@ -84,3 +84,11 @@ def test_line_count_is_preserved() -> None:
     diff = _file_diff("k.pem", KEY_BEGIN, "AAAA", "BBBB", KEY_END) + _file_diff(".env", "A=1")
     text, _ = redact_secrets(diff)
     assert text.count("\n") == diff.count("\n")
+
+
+def test_redact_file_handles_plain_text() -> None:
+    text, redactions = redact_file("deploy/.env", "API_KEY=abc123\n# keep\n")
+    assert text == "API_KEY=[REDACTED]\n# keep\n"
+    assert redactions == (Redaction("deploy/.env", "environment file values"),)
+    key_file = f"{KEY_BEGIN}\nMIIEvQ\n{KEY_END}\n"
+    assert redact_file("id_rsa", key_file)[0] == f"{KEY_BEGIN}\n[REDACTED]\n{KEY_END}\n"

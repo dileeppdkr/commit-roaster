@@ -13,7 +13,8 @@ from tests.fakes import SAMPLE_USAGE
 def test_text_renderer_plain(sample_result: RoastResult, sample_diff: Diff) -> None:
     output = TextRenderer().render(sample_result, sample_diff)
     assert "cringe score: 6/10" in output
-    assert "  - Leftover debug print in add()." in output
+    assert "  MEDIUM bugs  app.py:2" in output
+    assert "         Leftover debug print in add() spams stdout" in output
     assert "  Add debug logging to add()" in output
     assert "\033[" not in output
     assert "Note:" not in output
@@ -60,6 +61,9 @@ def test_json_renderer_includes_usage_and_cost(
         "model": "claude-haiku-5-5",
         "input_tokens": 1_200,
         "output_tokens": 300,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "tool_calls": 0,
         "estimated_cost_usd": pytest.approx(0.00027),
     }
 

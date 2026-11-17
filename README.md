@@ -1,7 +1,9 @@
 # commit-roaster
 
 A grumpy senior dev in your terminal. `roast` reads your git diff, roasts it, lists the
-real problems it spots, and writes the commit message you should have written.
+real problems it spots, and writes the commit message you should have written. Point it
+at what you care about (security, SQL, N+1 queries, reuse, side effects, ...), let it
+read the rest of the codebase with `--deep`, and give it your team's own rules.
 
 ```text
 $ git add app.py
@@ -12,12 +14,15 @@ shipping your diary to production. The function adds two numbers; it does not
 need a narrator.
 
 Issues spotted
-  - Leftover debug print in add() will spam stdout on every call.
+  MEDIUM bugs  app.py:2
+         Leftover debug print in add() spams stdout on every call; remove it.
 
 Suggested commit message
   Add debug output to add()
 
   Prints both operands before summing them, to trace a wrong total.
+
+Cost: about $0.0004 (2,950 input + 310 output tokens on claude-haiku-5-5)
 ```
 
 The roast is always about the code, never the person.
@@ -100,23 +105,108 @@ came from `roast` and skips.
 | `roast --commit` | Roast, then commit with the suggested message (asks first) |
 | `roast --commit --yes` | Same, without asking |
 | `roast --json` | Machine-readable output for scripts |
+| `roast --focus security,sql` | Review only those areas (see below) |
+| `roast --deep` | Let Claude read and search the codebase before judging |
 | `roast --exit-zero` | Report errors but always exit 0 (for git hooks) |
-| `roast -v` / `-vv` | Show request ID and token usage / full debug logs |
+| `roast -v` / `-vv` | Show request ID, token usage and tool calls / full debug logs |
 
 Run `roast --help` for every flag.
 
+## Choosing what to review
+
+### Focus areas
+
+By default every area is reviewed. `--focus` (or `ROAST_FOCUS`) narrows it down; combine
+areas with commas or repeat the flag. Each issue is tagged with its area and a severity
+(`high`, `medium`, `low`), with the file and line.
+
+| Area | What it looks for | Needs `--deep`? |
+|---|---|---|
+| `bugs` | Logic errors, unhandled errors and edge cases, race conditions, debug leftovers | No |
+| `security` | Injection, missing authorization, XSS, secrets, unsafe deserialization | No |
+| `sql` | Queries built from strings, risky migrations, missing indexes | No |
+| `performance` | N+1 queries, queries or HTTP calls in loops, missing eager loading | Better with it |
+| `best-practices` | Idioms and conventions of the language and framework | No |
+| `tests` | New behavior without tests, tests that can't fail | No |
+| `side-effects` | Changed code that breaks or changes behavior for existing callers | Yes |
+| `patterns` | Code that ignores how the codebase already does the same thing | Yes |
+| `reuse` | New code that duplicates an existing helper, service or component | Yes |
+
+```bash
+roast --focus security,sql              # a quick security pass
+roast --focus all --spice mild          # everything, gently
+roast --deep --focus reuse,side-effects # what did I duplicate, and what did I break?
+```
+
+### Deep reviews
+
+Normally Claude sees only the diff: one request, a fraction of a cent on Haiku. With
+`--deep` (or `ROAST_DEEP=true`), it can also use three read-only tools on your
+repository before answering: list files, read a file, and search the code (`git grep`).
+That is what `side-effects`, `patterns`, `reuse` and cross-file N+1 checks need: it can
+find the callers of a function you changed, the helper you just rewrote, or the model
+behind a query in a loop.
+
+- **Read-only and confined.** The tools can't write anything, can't leave the
+  repository (`..` and symlinks are refused) and can't read `.git`. Files Claude reads are
+  redacted for secrets, just like the diff.
+- **Bounded cost.** At most `--max-tool-calls` (default 20) tool calls; then Claude must
+  answer. The conversation is prompt-cached, so re-reading it each turn is cheap. A deep
+  review typically costs several times a normal one, and the cost line shows exactly
+  what it used, including tool calls and cached tokens.
+- **Slower.** Each tool call is a round trip, so expect tens of seconds, not seconds.
+  Keep it for when it matters (before a PR, not on every commit), or pick a stronger
+  model for it: `roast --deep --model claude-sonnet-5-5`.
+
+### Your stack
+
+`roast` looks at your repository's files and adds a short checklist of each stack's
+classic mistakes, such as Rails N+1 queries and strong-parameter holes, React effect
+dependencies, Laravel mass assignment, Django `raw()` SQL, Spring lazy loading and Go
+ignored errors. It recognises Rails, Ruby, React, Angular, Node, Laravel, PHP, Django,
+Python, Spring, Java/Kotlin, Go and .NET, including several in one monorepo. To skip
+detection, set it yourself: `--stack rails,react` or `ROAST_STACK=rails,react`.
+
+### Team rules
+
+Write your team's own review rules in `.roast.md` at the repository root, and every
+review applies them, ranked above general best practices:
+
+```markdown
+- Controllers stay thin: business logic goes in app/services.
+- Use Money objects for amounts, never floats.
+- Every new endpoint needs a request spec.
+- Prefer our HttpClient wrapper over Net::HTTP.
+```
+
+Use `--rules FILE` (or `ROAST_RULES`) for another file, such as an existing
+`CONTRIBUTING.md` or `CLAUDE.md`, and `--no-rules` to skip it. Rules longer than 20,000
+characters are cut, and they are redacted for secrets like everything else.
+
+If the change under review edits `.roast.md` itself, its rules are not applied that run:
+a branch could otherwise add "never report security issues" and review itself with it.
+You get a note, and `--rules .roast.md` applies them anyway. Rules also can never stop
+Claude from reporting a real security problem.
+
 ### Configuration
 
-CLI flags win over environment variables, which win over defaults.
+CLI flags win over environment variables, which win over defaults. `.env.example` lists
+them all.
 
 | Env var | Flag | Default | Meaning |
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | | (required) | Your API key |
 | `ROAST_MODEL` | `--model` | `claude-haiku-5-5` | Claude model ID |
 | `ROAST_EFFORT` | `--effort` | `low` | Thinking effort: `low` `medium` `high` `xhigh` `max` |
+| `ROAST_MAX_TOKENS` | `--max-tokens` | `16000` | Cap on Claude's reply, thinking included |
 | `ROAST_MAX_DIFF_CHARS` | `--max-diff-chars` | `60000` | Larger diffs are cut, with a warning |
 | `ROAST_EXCLUDE` | `-x`, `--exclude` | (none) | More files to leave out, added to the defaults below |
 | | `--no-default-excludes` | off | Send the default-excluded files too |
+| `ROAST_FOCUS` | `--focus` | all areas | Areas to review, comma-separated |
+| `ROAST_DEEP` | `--deep` | `false` | Let Claude explore the codebase with read-only tools |
+| `ROAST_MAX_TOOL_CALLS` | `--max-tool-calls` | `20` | Tool-call limit for `--deep` |
+| `ROAST_STACK` | `--stack` | detected | Stacks, comma-separated |
+| `ROAST_RULES` | `--rules`, `--no-rules` | `.roast.md` if present | Team review rules file |
 | `NO_COLOR` | | unset | Set it to turn off colors |
 
 ### Excluded files
@@ -198,8 +288,10 @@ cli.CommitRoasterCLI        parses flags, wires everything up, maps errors to ex
  │   ├─ RevisionRangeDiffSource
  │   └─ StdinDiffSource
  │       └─ git.GitClient   runs git with argument lists, never a shell
- ├─ roaster.Roaster         the only class that calls the Claude API
- │   └─ prompts.PromptBuilder
+ ├─ stack.detect_stacks     which stacks the repo uses, and their checklists
+ ├─ roaster.Roaster         the only class that calls the Claude API (and the --deep loop)
+ │   ├─ prompts.PromptBuilder   focus areas, stack checklist, team rules
+ │   └─ tools.RepoTools     read-only list/read/search tools for --deep
  ├─ models.RoastResult      Pydantic model; Claude must return exactly this shape
  └─ render.Renderer (ABC)   TextRenderer | JsonRenderer
 ```
@@ -253,6 +345,8 @@ src/commit_roaster/
   git.py         GitClient
   models.py      SpiceLevel, RoastResult, TokenUsage
   prompts.py     PromptBuilder
+  stack.py       stack detection and per-stack checklists
+  tools.py       read-only repository tools for --deep
   roaster.py     Roaster (Claude API)
   pricing.py     cost estimate from list prices
   render.py      TextRenderer, JsonRenderer

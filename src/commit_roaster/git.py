@@ -36,6 +36,7 @@ class GitClient:
         self._cwd = cwd
         self._executable = executable
         self._timeout = timeout
+        self._pcre = True  # until git says it can't do Perl-style regexes
 
     def ensure_repository(self) -> None:
         """Raise :class:`NotAGitRepositoryError` unless ``cwd`` is inside a work tree."""
@@ -70,6 +71,44 @@ class GitClient:
         args.extend(f":(top,exclude){pattern}" for pattern in exclude_patterns)
         return self._run(*args)
 
+    def toplevel(self) -> Path:
+        """The repository's root folder."""
+        return Path(self._run("rev-parse", "--show-toplevel").strip())
+
+    def ls_files(self, pathspec: str = "") -> list[str]:
+        """Tracked files, as paths from the repository root. ``pathspec`` (like
+        ``app/models/*.rb``) is relative to ``cwd``; without one, the whole repository."""
+        output = self._run("ls-files", "-z", "--full-name", "--", pathspec or ":/")
+        return [path for path in output.split("\0") if path]
+
+    def grep(
+        self, pattern: str, pathspec: str = "", *, max_per_file: int = 10
+    ) -> list[tuple[str, int, str]]:
+        """``(path, line number, line)`` for each tracked-file line matching ``pattern``.
+        No matches is an empty list, not an error.
+
+        Uses Perl-style regexes (``\\w``, ``\\d``) when git was built with PCRE, which
+        most builds are, and POSIX extended regexes otherwise.
+        """
+        while True:
+            flavor = "-P" if self._pcre else "-E"
+            try:
+                output = self._run(
+                    "grep", "-n", "-I", "--null", "--no-color", f"--max-count={max_per_file}",
+                    flavor, "-e", pattern, "--", *([pathspec] if pathspec else []),
+                    ok_returncodes=(0, 1),
+                )  # fmt: skip
+                break
+            except GitCommandError as exc:
+                if not self._pcre or "USE_LIBPCRE" not in str(exc):
+                    raise
+                self._pcre = False  # this git has no PCRE; use POSIX regexes from now on
+        hits = []
+        for line in output.splitlines():
+            path, number, text = line.split("\0", 2)
+            hits.append((path, int(number), text))
+        return hits
+
     def staged_tree(self) -> str:
         """The id of the tree the staged changes would commit (``git write-tree``)."""
         return self._run("write-tree").strip()
@@ -91,6 +130,7 @@ class GitClient:
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
         time_limit: bool = True,
+        ok_returncodes: tuple[int, ...] = (0,),
     ) -> str:
         executable = shutil.which(self._executable)
         if executable is None:
@@ -112,7 +152,7 @@ class GitClient:
             raise GitError(f"git {args[0]} timed out after {self._timeout:g}s.") from exc
         except OSError as exc:
             raise GitError(f"Could not run git: {exc}") from exc
-        if completed.returncode != 0:
+        if completed.returncode not in ok_returncodes:
             detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
             raise GitCommandError(f"git {args[0]} failed (exit {completed.returncode}): {detail}")
         return completed.stdout

@@ -7,8 +7,10 @@ import textwrap
 from abc import ABC, abstractmethod
 
 from commit_roaster.diff import Diff
-from commit_roaster.models import RoastResult, TokenUsage
+from commit_roaster.models import Issue, RoastResult, Severity, TokenUsage
 from commit_roaster.pricing import describe_usage, estimate_cost
+
+_SEVERITY_ORDER = {Severity.HIGH: 0, Severity.MEDIUM: 1, Severity.LOW: 2}
 
 
 class Renderer(ABC):
@@ -40,10 +42,18 @@ class TextRenderer(Renderer):
         ]
         if result.issues:
             lines.append(self._heading("Issues spotted"))
-            lines.extend(
-                textwrap.fill(issue, self._width, initial_indent="  - ", subsequent_indent="    ")
-                for issue in result.issues
-            )
+            for issue in sorted(result.issues, key=lambda issue: _SEVERITY_ORDER[issue.severity]):
+                where = f"{issue.file}:{issue.line}" if issue.line > 0 else issue.file
+                tag = self._paint(f"{issue.severity.upper():<6}", self._severity_color(issue))
+                lines.append(f"  {tag} {issue.category}  {where}")
+                lines.append(
+                    textwrap.fill(
+                        issue.problem,
+                        self._width,
+                        initial_indent="         ",
+                        subsequent_indent="         ",
+                    )
+                )
             lines.append("")
         lines.append(self._heading("Suggested commit message"))
         lines.extend(
@@ -73,6 +83,11 @@ class TextRenderer(Renderer):
             return self._YELLOW
         return self._RED
 
+    def _severity_color(self, issue: Issue) -> str:
+        return {Severity.HIGH: self._RED, Severity.MEDIUM: self._YELLOW}.get(
+            issue.severity, self._DIM
+        )
+
     def _paint(self, text: str, code: str) -> str:
         return f"{code}{text}{self._RESET}" if self._color else text
 
@@ -82,7 +97,7 @@ class JsonRenderer(Renderer):
 
     def render(self, result: RoastResult, diff: Diff, usage: TokenUsage | None = None) -> str:
         payload: dict[str, object] = {
-            **result.model_dump(),
+            **result.model_dump(mode="json"),
             "commit_message": result.commit_message,
             "diff": {
                 "source": diff.description,
@@ -98,6 +113,9 @@ class JsonRenderer(Renderer):
                 "model": usage.model,
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
+                "cache_read_tokens": usage.cache_read_tokens,
+                "cache_write_tokens": usage.cache_write_tokens,
+                "tool_calls": usage.tool_calls,
                 "estimated_cost_usd": estimate_cost(usage),
             }
         return json.dumps(payload, indent=2, ensure_ascii=False)
