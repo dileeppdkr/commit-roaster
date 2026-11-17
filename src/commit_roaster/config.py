@@ -12,8 +12,8 @@ from commit_roaster.exceptions import ConfigError
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 EFFORT_LEVELS: tuple[Effort, ...] = get_args(Effort)
 
-DEFAULT_MODEL = "claude-opus-5-5"
-DEFAULT_EFFORT: Effort = "medium"
+DEFAULT_MODEL = "claude-haiku-5-5"
+DEFAULT_EFFORT: Effort = "low"
 DEFAULT_MAX_TOKENS = 16_000
 # ~15k tokens of diff. Larger diffs are truncated, with a warning, not silently.
 DEFAULT_MAX_DIFF_CHARS = 60_000
