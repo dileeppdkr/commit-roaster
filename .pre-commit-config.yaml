@@ -1,0 +1,27 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        # Prefer the project venv from `make install`; otherwise use whatever mypy is on PATH.
+        entry: sh -c 'if [ -x .venv/bin/mypy ]; then exec .venv/bin/mypy; else exec mypy; fi'
+        language: system
+        types: [python]
+        pass_filenames: false
