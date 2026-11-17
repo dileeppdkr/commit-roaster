@@ -99,6 +99,16 @@ def test_empty_diff_exit_code(sample_result: RoastResult) -> None:
     assert "Nothing to roast" in harness.stderr.getvalue()
 
 
+def test_exit_zero_reports_error_but_succeeds(sample_result: RoastResult) -> None:
+    harness = Harness(sample_result, git=FakeGit(diff_text=""))
+    assert harness.run("--exit-zero") == ExitCode.OK
+    assert "Nothing to roast" in harness.stderr.getvalue()
+
+
+def test_exit_zero_keeps_usage_errors(sample_result: RoastResult) -> None:
+    assert Harness(sample_result).run("--exit-zero", "--spice", "nuclear") == ExitCode.USAGE
+
+
 def test_bad_env_is_usage_error(sample_result: RoastResult) -> None:
     harness = Harness(sample_result, env={"ROAST_EFFORT": "turbo"})
     assert harness.run() == ExitCode.USAGE

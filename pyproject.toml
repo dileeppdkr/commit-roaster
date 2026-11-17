@@ -37,6 +37,10 @@ dev = [
     "ruff==0.17.5",  # keep in sync with the ruff-pre-commit rev in .pre-commit-config.yaml
 ]
 
+[project.urls]
+Homepage = "https://github.com/dileeppdkr/commit-roaster"
+Issues = "https://github.com/dileeppdkr/commit-roaster/issues"
+
 [project.scripts]
 roast = "commit_roaster.cli:main"
 

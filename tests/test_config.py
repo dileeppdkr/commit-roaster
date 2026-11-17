@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from commit_roaster.config import DEFAULT_MODEL, Settings, parse_effort
+from commit_roaster.config import DEFAULT_EFFORT, DEFAULT_MODEL, Settings, parse_effort
 from commit_roaster.exceptions import ConfigError
 
 
 def test_defaults() -> None:
     settings = Settings()
     assert settings.model == DEFAULT_MODEL
-    assert settings.effort == "medium"
+    assert settings.effort == DEFAULT_EFFORT
     assert "*.lock" in settings.exclude_patterns
 
 

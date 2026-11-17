@@ -78,13 +78,16 @@ class CommitRoasterCLI:
 
         self._configure_logging(args.verbose)
         try:
-            return self._execute(args)
+            code = self._execute(args)
         except CommitRoasterError as exc:
             self._print_err(f"error: {exc}")
-            return exc.exit_code
+            code = exc.exit_code
         except KeyboardInterrupt:
             self._print_err("Interrupted.")
             return ExitCode.INTERRUPTED
+        # In a git hook, a failed roast (no key, API down, nothing left to roast after
+        # excluding lock files) must not block the commit.
+        return ExitCode.OK if args.exit_zero else code
 
     def build_parser(self) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
@@ -129,6 +132,11 @@ class CommitRoasterCLI:
             type=_positive_int,
             metavar="N",
             help="truncate larger diffs, with a warning (env: ROAST_MAX_DIFF_CHARS)",
+        )
+        parser.add_argument(
+            "--exit-zero",
+            action="store_true",
+            help="exit 0 even when the roast fails, so a git hook never blocks a commit",
         )
         parser.add_argument(
             "-v", "--verbose", action="count", default=0, help="-v for info, -vv for debug logs"

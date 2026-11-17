@@ -1,0 +1,14 @@
+# Lets other repositories run `roast` as a pre-commit hook. See "Use it in your project"
+# in README.md.
+- id: roast
+  name: roast staged changes
+  description: Claude roasts the staged diff and suggests a commit message (needs ANTHROPIC_API_KEY).
+  entry: roast
+  # Never block a commit because the roast failed. Drop it from `args` to make failures fatal.
+  args: [--exit-zero]
+  language: python
+  pass_filenames: false
+  require_serial: true
+  # pre-commit hides the output of passing hooks unless this is set.
+  verbose: true
+  stages: [pre-commit]

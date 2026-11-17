@@ -24,21 +24,42 @@ The roast is always about the code, never the person.
 
 ## Install
 
-Needs Python 3.12+ and git.
+Needs Python 3.12+ and git. Install it once, as a command-line tool, and `roast` works in
+every git repository on your machine:
 
 ```bash
-git clone https://github.com/dileeppdkr/commit-roaster.git
-cd commit-roaster
-make install            # creates .venv, installs the package and dev tools
-source .venv/bin/activate
+pipx install commit-roaster            # or: uv tool install commit-roaster
+
+# Before the first PyPI release, install straight from GitHub:
+pipx install git+https://github.com/dileeppdkr/commit-roaster.git
 ```
 
-Then set your Anthropic API key (get one at https://platform.claude.com/settings/keys):
+Then set your Anthropic API key (get one at https://platform.claude.com/settings/keys),
+for example in your shell profile:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-# or: cp .env.example .env, edit it, then:  set -a; source .env; set +a
 ```
+
+## Use it in your project
+
+Run `roast` in any repository after `git add`. To get roasted on every commit, add it as a
+[pre-commit](https://pre-commit.com) hook. In your project's `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/dileeppdkr/commit-roaster
+    rev: v0.1.0
+    hooks:
+      - id: roast
+        # Optional: these replace the default args, so keep --exit-zero.
+        # args: [--exit-zero, --spice, savage, --model, claude-sonnet-5-5]
+```
+
+Then run `pre-commit install`. Each `git commit` now prints the roast before the commit is
+made. Everyone who commits needs `ANTHROPIC_API_KEY` set. Without it, they see an error
+and the commit still goes through, because the hook passes `--exit-zero`. Every commit
+makes one API call, so skip a run with `SKIP=roast git commit ...`.
 
 ## Usage
 
@@ -51,6 +72,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `roast --commit` | Roast, then commit with the suggested message (asks first) |
 | `roast --commit --yes` | Same, without asking |
 | `roast --json` | Machine-readable output for scripts |
+| `roast --exit-zero` | Report errors but always exit 0 (for git hooks) |
 | `roast -v` / `-vv` | Show request ID and token usage / full debug logs |
 
 Run `roast --help` for every flag.
@@ -62,8 +84,8 @@ CLI flags win over environment variables, which win over defaults.
 | Env var | Flag | Default | Meaning |
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | | (required) | Your API key |
-| `ROAST_MODEL` | `--model` | `claude-opus-5-5` | Claude model ID |
-| `ROAST_EFFORT` | `--effort` | `medium` | Thinking effort: `low` `medium` `high` `xhigh` `max` |
+| `ROAST_MODEL` | `--model` | `claude-haiku-5-5` | Claude model ID |
+| `ROAST_EFFORT` | `--effort` | `low` | Thinking effort: `low` `medium` `high` `xhigh` `max` |
 | `ROAST_MAX_DIFF_CHARS` | `--max-diff-chars` | `60000` | Larger diffs are cut, with a warning |
 | `NO_COLOR` | | unset | Set it to turn off colors |
 
@@ -82,9 +104,9 @@ out of the diff, so you don't pay to send noise.
 
 ### Cost
 
-Each run makes one API call. Cost grows with diff size; a typical small commit costs about
-a cent on `claude-opus-5-5`. Use `--effort low` or `ROAST_MODEL=claude-haiku-5-5` for
-cheaper runs.
+Each run makes one API call. Cost grows with diff size. On the default `claude-haiku-5-5`
+at `low` effort, even a maximum-size diff costs well under a cent. For sharper roasts, try
+`--model claude-sonnet-5-5` or `claude-opus-5-5` (roughly 20 to 40 times the price).
 
 ## How it works
 
@@ -112,6 +134,7 @@ A few decisions worth knowing:
 - **Refusal fallback.** Requests opt in to the API's server-side fallback
   (`fallbacks="default"`). If the model's safety classifier declines a diff, the API retries
   it on a fallback model in the same call. If every model declines, you get a clear error.
+  Haiku models have no fallback, so a declined diff gives the error right away.
 - **Prompt injection.** The diff is wrapped in `<diff>` tags and the system prompt tells
   Claude to treat anything inside as code to review, not as instructions.
 - **No silent truncation.** Oversized diffs are cut at a line boundary, you get a warning,
@@ -123,6 +146,11 @@ A few decisions worth knowing:
 ## Development
 
 ```bash
+git clone https://github.com/dileeppdkr/commit-roaster.git
+cd commit-roaster
+make install    # creates .venv, installs the package and dev tools, sets up pre-commit
+source .venv/bin/activate
+
 make check      # lint + type check + tests: the same steps CI runs
 make format     # auto-fix and format
 make test       # pytest with coverage (fails under 90%)
@@ -148,6 +176,31 @@ src/commit_roaster/
   exceptions.py  error types and exit codes
 tests/           one test module per source module
 ```
+
+### Releasing
+
+Pushing a version tag publishes the package to PyPI through
+`.github/workflows/release.yml`. It uses PyPI trusted publishing, so no token is stored in
+GitHub.
+
+One-time setup:
+
+1. Create an account on [pypi.org](https://pypi.org).
+2. Under *Your projects → Publishing*, add a pending trusted publisher: project
+   `commit-roaster`, owner `dileeppdkr`, repository `commit-roaster`, workflow
+   `release.yml`, environment `pypi`.
+3. In the GitHub repo, go to *Settings → Environments* and create an environment named
+   `pypi`.
+
+For each release, bump `version` in `pyproject.toml`, commit, then:
+
+```bash
+git tag v0.1.0
+git push origin main v0.1.0
+```
+
+The workflow refuses to publish if the tag does not match the version. The same tag is
+what pre-commit users put in `rev:`.
 
 ## License
 
