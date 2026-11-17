@@ -134,6 +134,20 @@ class CommitRoasterCLI:
             help="truncate larger diffs, with a warning (env: ROAST_MAX_DIFF_CHARS)",
         )
         parser.add_argument(
+            "-x",
+            "--exclude",
+            action="append",
+            default=[],
+            metavar="PATTERN",
+            help="leave matching files out of the diff, e.g. 'app/assets/builds'; "
+            "repeat or comma-separate (env: ROAST_EXCLUDE)",
+        )
+        parser.add_argument(
+            "--no-default-excludes",
+            action="store_true",
+            help="also send lock files, schema dumps, snapshots and vendored code",
+        )
+        parser.add_argument(
             "--exit-zero",
             action="store_true",
             help="exit 0 even when the roast fails, so a git hook never blocks a commit",
@@ -160,7 +174,11 @@ class CommitRoasterCLI:
 
     def _execute(self, args: argparse.Namespace) -> int:
         settings = Settings.from_env(self._env).with_overrides(
-            model=args.model, effort=args.effort, max_diff_chars=args.max_diff_chars
+            model=args.model,
+            effort=args.effort,
+            max_diff_chars=args.max_diff_chars,
+            exclude=args.exclude,
+            default_excludes=False if args.no_default_excludes else None,
         )
         git = self._git_factory()
         diff = self._build_source(args, git, settings).load(settings.max_diff_chars)

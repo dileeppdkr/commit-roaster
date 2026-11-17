@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Literal, get_args
 
@@ -17,19 +17,76 @@ DEFAULT_EFFORT: Effort = "low"
 DEFAULT_MAX_TOKENS = 16_000
 # ~15k tokens of diff. Larger diffs are truncated, with a warning, not silently.
 DEFAULT_MAX_DIFF_CHARS = 60_000
-# Generated or vendored files that add noise and cost but nothing worth roasting.
+
+
+def _anywhere(*paths: str) -> tuple[str, ...]:
+    """Match ``paths`` in any folder, not just at the root (useful in monorepos)."""
+    return tuple(pattern for path in paths for pattern in (path, f"*/{path}"))
+
+
+# Generated or vendored files that are often committed but add noise and cost, not
+# anything worth roasting. Git pathspec rules, from the repository root: `*` also
+# matches `/`, and a plain path matches that file or everything under that folder.
+#
+# One rule: file patterns match in any folder (monorepos); folder patterns match only
+# at the root, so `vendor` does not hide a hand-written `app/services/vendor/`.
+# Never add a pattern that could match code someone wrote by hand. Extension patterns
+# (`*.lock`, `*.lockfile`, `*.min.js`) are safe because the extension itself marks
+# the file as generated. Anchor fixed names with `_anywhere` instead of a leading `*`,
+# so `zz_generated.*` cannot match `notzz_generated.go`.
 DEFAULT_EXCLUDE_PATTERNS: tuple[str, ...] = (
+    # Lock files: Gemfile.lock, yarn.lock, composer.lock, poetry.lock, uv.lock,
+    # Cargo.lock, Podfile.lock, pubspec.lock, mix.lock, gradle.lockfile, ...
     "*.lock",
-    "package-lock.json",
-    "pnpm-lock.yaml",
+    "*.lockfile",
+    *_anywhere(
+        "package-lock.json",  # npm
+        "npm-shrinkwrap.json",  # npm
+        "pnpm-lock.yaml",  # pnpm
+        "go.sum",  # Go
+        "go.work.sum",  # Go workspaces
+        "packages.lock.json",  # NuGet (.NET)
+        "Package.resolved",  # Swift Package Manager
+        ".terraform.lock.hcl",  # Terraform
+    ),
+    # Minified bundles, source maps and Jest/Vitest snapshots (React, Angular, ...)
     "*.min.js",
     "*.min.css",
     "*.map",
+    "*.snap",
+    # Rails: schema dumps generated from migrations (the migration is the real change)
+    # and precompiled assets
+    *_anywhere("db/schema.rb", "db/structure.sql"),
+    "public/assets",
+    "public/packs",
+    # PHP / Laravel: Vite build output and generated IDE helpers
+    "public/build",
+    *_anywhere("_ide_helper.php", "_ide_helper_models.php", ".phpstorm.meta.php"),
+    # Java / Kotlin: Gradle and Maven wrapper scripts (also in Android folders)
+    *_anywhere("gradlew", "gradlew.bat", "mvnw", "mvnw.cmd"),
+    # Generated code: protobuf/gRPC (Go, Python), Kubernetes deepcopy (Go),
+    # build_runner and freezed (Dart/Flutter)
+    "*.pb.go",
+    "*.pb.gw.go",
+    *_anywhere("zz_generated.*"),
+    "*_pb2.py",
+    "*_pb2.pyi",
+    "*_pb2_grpc.py",
+    "*.g.dart",
+    "*.freezed.dart",
+    # .NET: designer files and the Entity Framework model snapshot (like schema.rb)
+    "*.Designer.cs",
+    *_anywhere("Migrations/*ModelSnapshot.cs"),
+    # Xcode project file (Swift / iOS)
+    "*.pbxproj",
+    # Third-party code checked in by Composer, Bundler, importmap or `go mod vendor`
+    "vendor",
 )
 
 ENV_MODEL = "ROAST_MODEL"
 ENV_EFFORT = "ROAST_EFFORT"
 ENV_MAX_DIFF_CHARS = "ROAST_MAX_DIFF_CHARS"
+ENV_EXCLUDE = "ROAST_EXCLUDE"
 
 
 def parse_effort(value: str) -> Effort:
@@ -57,6 +114,21 @@ def parse_positive_int(value: str, name: str | None = None) -> int:
     return number
 
 
+def parse_patterns(values: Iterable[str]) -> tuple[str, ...]:
+    """Split comma-separated exclude patterns and tidy them.
+
+    A leading ``/`` or ``./`` is dropped, so gitignore-style ``/vendor`` works:
+    patterns are always matched from the repository root.
+    """
+    patterns: list[str] = []
+    for value in values:
+        for raw in value.split(","):
+            pattern = raw.strip().removeprefix("./").lstrip("/")
+            if pattern:
+                patterns.append(pattern)
+    return tuple(patterns)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Immutable configuration for one run."""
@@ -65,7 +137,14 @@ class Settings:
     effort: Effort = DEFAULT_EFFORT
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_diff_chars: int = DEFAULT_MAX_DIFF_CHARS
-    exclude_patterns: tuple[str, ...] = DEFAULT_EXCLUDE_PATTERNS
+    extra_excludes: tuple[str, ...] = ()
+    default_excludes: bool = True
+
+    @property
+    def exclude_patterns(self) -> tuple[str, ...]:
+        """Every pattern to leave out of the diff: the defaults (unless turned off) plus extras."""
+        defaults = DEFAULT_EXCLUDE_PATTERNS if self.default_excludes else ()
+        return defaults + self.extra_excludes
 
     def __post_init__(self) -> None:
         if not self.model.strip():
@@ -90,6 +169,8 @@ class Settings:
             settings = replace(
                 settings, max_diff_chars=parse_positive_int(max_chars, ENV_MAX_DIFF_CHARS)
             )
+        if excludes := parse_patterns([source.get(ENV_EXCLUDE, "")]):
+            settings = replace(settings, extra_excludes=excludes)
         return settings
 
     def with_overrides(
@@ -98,8 +179,13 @@ class Settings:
         model: str | None = None,
         effort: str | None = None,
         max_diff_chars: int | None = None,
+        exclude: Iterable[str] = (),
+        default_excludes: bool | None = None,
     ) -> Settings:
-        """Return a copy with any non-``None`` overrides applied (used for CLI flags)."""
+        """Return a copy with any overrides applied (used for CLI flags).
+
+        ``exclude`` patterns are added to the ones already set (e.g. from the environment).
+        """
         settings = self
         if model is not None:
             settings = replace(settings, model=model)
@@ -107,4 +193,8 @@ class Settings:
             settings = replace(settings, effort=parse_effort(effort))
         if max_diff_chars is not None:
             settings = replace(settings, max_diff_chars=max_diff_chars)
+        if extra := parse_patterns(exclude):
+            settings = replace(settings, extra_excludes=settings.extra_excludes + extra)
+        if default_excludes is not None:
+            settings = replace(settings, default_excludes=default_excludes)
         return settings

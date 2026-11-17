@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from commit_roaster.config import DEFAULT_EXCLUDE_PATTERNS
+from commit_roaster.diff import exclude_files
 from commit_roaster.exceptions import GitCommandError, GitError, NotAGitRepositoryError
 from commit_roaster.git import GitClient
 
@@ -28,6 +30,114 @@ def test_exclude_patterns_hide_matching_files(git_repo: Path) -> None:
     diff = GitClient(git_repo).diff(staged=True, exclude_patterns=["*.lock"])
     assert "hello.py" in diff
     assert "poetry.lock" not in diff
+
+
+# Real paths from projects in each stack, and whether the default excludes should
+# keep them in the review. Hand-written files with "risky" names must stay True.
+_STACK_PATHS = {
+    # Go
+    "go.mod": True,
+    "go.sum": False,
+    "services/billing/go.sum": False,
+    "cmd/server/main.go": True,
+    "api/v1/user.pb.go": False,
+    "api/v1/user.pb.gw.go": False,
+    "pkg/apis/v1/zz_generated.deepcopy.go": False,
+    "internal/format_string.go": True,
+    "internal/notzz_generated.go": True,
+    # Java / Kotlin
+    "pom.xml": True,
+    "build.gradle.kts": True,
+    "gradlew": False,
+    "gradlew.bat": False,
+    "android/gradlew": False,
+    "mvnw": False,
+    "mvnw.cmd": False,
+    "gradle.lockfile": False,
+    "src/main/java/com/acme/UserService.java": True,
+    "src/main/kotlin/com/acme/Gradle.kt": True,
+    # .NET
+    "src/Web/packages.lock.json": False,
+    "src/Web/Forms/MainForm.Designer.cs": False,
+    "src/Data/Migrations/AppDbContextModelSnapshot.cs": False,
+    "src/Data/Migrations/20260101000000_Init.cs": True,
+    "src/Data/DataMigrations/UserModelSnapshot.cs": True,
+    "Migrations/AppDbContextModelSnapshot.cs": False,
+    "src/Services/SnapshotService.cs": True,
+    # Swift / iOS
+    "Package.resolved": False,
+    "App.xcodeproj/project.pbxproj": False,
+    "Podfile.lock": False,
+    "Sources/App/ContentView.swift": True,
+    # Dart / Flutter
+    "pubspec.lock": False,
+    "lib/models/user.dart": True,
+    "lib/models/user.g.dart": False,
+    "lib/models/user.freezed.dart": False,
+    # Rust
+    "Cargo.lock": False,
+    "src/main.rs": True,
+    # Terraform
+    ".terraform.lock.hcl": False,
+    "infra/prod/.terraform.lock.hcl": False,
+    "infra/prod/main.tf": True,
+    # Rails
+    "Gemfile.lock": False,
+    "db/schema.rb": False,
+    "db/structure.sql": False,
+    "api/db/schema.rb": False,
+    "db/migrate/20260101000000_create_users.rb": True,
+    "app/models/user.rb": True,
+    "app/services/json_schema.rb": True,
+    "app/services/vendor/sync.rb": True,
+    "public/assets/application-3f2a.css": False,
+    # React / Angular
+    "package-lock.json": False,
+    "web/package-lock.json": False,
+    "yarn.lock": False,
+    "pnpm-lock.yaml": False,
+    "src/App.tsx": True,
+    "src/__snapshots__/App.test.tsx.snap": False,
+    "src/app/app.component.ts": True,
+    "dist/main.min.js": False,
+    # PHP / Laravel
+    "composer.lock": False,
+    "vendor/autoload.php": False,
+    "vendors/report.php": True,
+    "app/Http/Controllers/UserController.php": True,
+    "public/build/manifest.json": False,
+    "_ide_helper.php": False,
+    "backend/_ide_helper.php": False,
+    "app/vendor/acme/Client.php": True,
+    # Python
+    "poetry.lock": False,
+    "uv.lock": False,
+    "src/app/main.py": True,
+    "proto/user_pb2.py": False,
+    "proto/user_pb2.pyi": False,
+    "proto/user_pb2_grpc.py": False,
+}
+
+
+def test_default_excludes_match_git_and_stdin_filter(git_repo: Path) -> None:
+    for name in _STACK_PATHS:
+        path = git_repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True)
+    client = GitClient(git_repo)
+
+    def files_in(diff: str) -> set[str]:
+        # Every sample file is new, so each has exactly one "+++ b/<path>" line, which
+        # holds the path alone (unlike the "diff --git a/<path> b/<path>" header).
+        prefix = "+++ b/"
+        return {line.removeprefix(prefix) for line in diff.splitlines() if line.startswith(prefix)}
+
+    expected = {name for name, keep in _STACK_PATHS.items() if keep}
+    from_git = files_in(client.diff(staged=True, exclude_patterns=DEFAULT_EXCLUDE_PATTERNS))
+    from_stdin = files_in(exclude_files(client.diff(staged=True), DEFAULT_EXCLUDE_PATTERNS))
+    assert from_git == expected
+    assert from_stdin == expected
 
 
 def test_diff_covers_whole_repo_from_subdirectory(git_repo: Path) -> None:

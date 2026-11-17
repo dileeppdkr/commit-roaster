@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from commit_roaster.config import DEFAULT_EFFORT, DEFAULT_MODEL, Settings, parse_effort
+from commit_roaster.config import (
+    DEFAULT_EFFORT,
+    DEFAULT_EXCLUDE_PATTERNS,
+    DEFAULT_MODEL,
+    Settings,
+    parse_effort,
+)
 from commit_roaster.exceptions import ConfigError
 
 
@@ -30,6 +36,22 @@ def test_from_env_ignores_blank_values() -> None:
 def test_from_env_rejects_bad_max_chars(value: str) -> None:
     with pytest.raises(ConfigError, match="ROAST_MAX_DIFF_CHARS"):
         Settings.from_env({"ROAST_MAX_DIFF_CHARS": value})
+
+
+def test_from_env_adds_extra_excludes() -> None:
+    settings = Settings.from_env({"ROAST_EXCLUDE": " app/assets/builds, /vendor/x ,,./tmp "})
+    assert settings.extra_excludes == ("app/assets/builds", "vendor/x", "tmp")
+    assert settings.exclude_patterns == (*DEFAULT_EXCLUDE_PATTERNS, *settings.extra_excludes)
+
+
+def test_flag_excludes_add_to_env_excludes() -> None:
+    settings = Settings.from_env({"ROAST_EXCLUDE": "a"}).with_overrides(exclude=["b,c", "d"])
+    assert settings.extra_excludes == ("a", "b", "c", "d")
+
+
+def test_default_excludes_can_be_turned_off() -> None:
+    settings = Settings().with_overrides(exclude=["coverage"], default_excludes=False)
+    assert settings.exclude_patterns == ("coverage",)
 
 
 def test_direct_construction_normalizes_effort() -> None:

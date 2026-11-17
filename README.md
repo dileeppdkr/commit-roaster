@@ -43,8 +43,19 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ## Use it in your project
 
-Run `roast` in any repository after `git add`. To get roasted on every commit, add it as a
-[pre-commit](https://pre-commit.com) hook. In your project's `.pre-commit-config.yaml`:
+`roast` works on any language: Rails, React, Angular, PHP, Python, Java, Go, .NET or
+anything else in git.
+Run it in any repository after `git add`. To get roasted on every commit, call it from the
+git hook tool your project already uses. Always pass `--exit-zero` in a hook: without it,
+a missing key or an API outage would block the commit.
+
+| Stack | Usual hook tool | Needs `roast` installed by each developer? |
+|---|---|---|
+| Python, PHP, Java, Go, any | [pre-commit](https://pre-commit.com) | No, pre-commit installs it |
+| React, Angular | [husky](https://typicode.github.io/husky/) | Yes (`pipx install commit-roaster`) |
+| Rails, PHP, Go, Java, any | [lefthook](https://lefthook.dev) | Yes (`pipx install commit-roaster`) |
+
+**pre-commit**, in `.pre-commit-config.yaml`, then run `pre-commit install`:
 
 ```yaml
 repos:
@@ -52,14 +63,30 @@ repos:
     rev: v0.1.0
     hooks:
       - id: roast
-        # Optional: these replace the default args, so keep --exit-zero.
-        # args: [--exit-zero, --spice, savage, --model, claude-sonnet-5-5]
+        # Optional. Setting `args` replaces the hook's own args, so keep --exit-zero.
+        # --exclude adds to the built-in excludes; it does not replace them.
+        # args: [--exit-zero, --spice, savage, --exclude, "app/assets/builds"]
 ```
 
-Then run `pre-commit install`. Each `git commit` now prints the roast before the commit is
-made. Everyone who commits needs `ANTHROPIC_API_KEY` set. Without it, they see an error
-and the commit still goes through, because the hook passes `--exit-zero`. Every commit
-makes one API call, so skip a run with `SKIP=roast git commit ...`.
+**husky** (React, Angular), in `.husky/pre-commit`:
+
+```sh
+roast --exit-zero
+```
+
+**lefthook** (Rails, PHP), in `lefthook.yml`, then run `lefthook install`:
+
+```yaml
+pre-commit:
+  commands:
+    roast:
+      run: roast --exit-zero
+```
+
+Everyone who commits needs `ANTHROPIC_API_KEY` set. Without it, they see an error and the
+commit still goes through. Every commit makes one API call. To skip one, use
+`SKIP=roast git commit ...` with pre-commit, `HUSKY=0` with husky, or `LEFTHOOK=0` with
+lefthook.
 
 ## Usage
 
@@ -87,10 +114,43 @@ CLI flags win over environment variables, which win over defaults.
 | `ROAST_MODEL` | `--model` | `claude-haiku-5-5` | Claude model ID |
 | `ROAST_EFFORT` | `--effort` | `low` | Thinking effort: `low` `medium` `high` `xhigh` `max` |
 | `ROAST_MAX_DIFF_CHARS` | `--max-diff-chars` | `60000` | Larger diffs are cut, with a warning |
+| `ROAST_EXCLUDE` | `-x`, `--exclude` | (none) | More files to leave out, added to the defaults below |
+| | `--no-default-excludes` | off | Send the default-excluded files too |
 | `NO_COLOR` | | unset | Set it to turn off colors |
 
-Lock files and minified assets (`*.lock`, `package-lock.json`, `*.min.js`, ...) are left
-out of the diff, so you don't pay to send noise.
+### Excluded files
+
+Generated and vendored files are left out of the diff, so you don't pay to send noise:
+
+| Stack | Left out by default |
+|---|---|
+| All | `*.lock` and `*.lockfile` (`Gemfile.lock`, `yarn.lock`, `composer.lock`, `poetry.lock`, `Cargo.lock`, `gradle.lockfile`, ...), `*.min.js`, `*.min.css`, `*.map` |
+| React, Angular | `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, Jest/Vitest `*.snap` |
+| Rails | `db/schema.rb`, `db/structure.sql` (review the migration instead), `public/assets/`, `public/packs/` |
+| PHP, Laravel | `vendor/` (root only), `public/build/`, `_ide_helper.php`, `_ide_helper_models.php`, `.phpstorm.meta.php` |
+| Python | Lock files, protobuf/gRPC code (`*_pb2.py`, `*_pb2.pyi`, `*_pb2_grpc.py`) |
+| Java, Kotlin | `gradlew`, `gradlew.bat`, `mvnw`, `mvnw.cmd`, `gradle.lockfile` |
+| Go | `go.sum`, `go.work.sum`, `*.pb.go`, `*.pb.gw.go`, `zz_generated.*`, `vendor/` (root only) |
+| .NET | `packages.lock.json`, `*.Designer.cs`, the EF Core `*ModelSnapshot.cs` in `Migrations/` |
+| Swift, iOS | `Package.resolved`, `Podfile.lock`, `*.pbxproj` |
+| Dart, Flutter | `pubspec.lock`, `*.g.dart`, `*.freezed.dart` |
+| Rust, Elixir | `Cargo.lock`, `mix.lock` |
+| Terraform | `.terraform.lock.hcl` |
+
+File patterns match in any folder, so monorepos work too (`web/package-lock.json`,
+`android/gradlew`). Folder patterns (`vendor/`, `public/assets/`, `public/packs/`,
+`public/build/`) match only at the root, so a hand-written `app/services/vendor/` is
+still reviewed. In a monorepo, add nested ones yourself, e.g.
+`-x backend/vendor -x services/api/vendor`.
+
+To leave out more, use `--exclude` (repeat it, or separate patterns with commas) or
+`ROAST_EXCLUDE`. Patterns follow git's rules from the repository root: `*` also matches
+`/`, and a folder name leaves out everything under it.
+
+```bash
+roast -x app/assets/builds -x 'coverage,storage/*.json'
+export ROAST_EXCLUDE='app/assets/builds,coverage'
+```
 
 ### Exit codes
 

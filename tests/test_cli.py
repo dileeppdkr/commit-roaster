@@ -99,6 +99,13 @@ def test_empty_diff_exit_code(sample_result: RoastResult) -> None:
     assert "Nothing to roast" in harness.stderr.getvalue()
 
 
+def test_exclude_flags_reach_git(sample_result: RoastResult) -> None:
+    harness = Harness(sample_result, env={"ROAST_EXCLUDE": "tmp"})
+    harness.run("--exclude", "app/assets/builds", "-x", "a,b", "--no-default-excludes")
+    exclude_patterns = harness.git.diff_calls[0][2]
+    assert exclude_patterns == ("tmp", "app/assets/builds", "a", "b")
+
+
 def test_exit_zero_reports_error_but_succeeds(sample_result: RoastResult) -> None:
     harness = Harness(sample_result, git=FakeGit(diff_text=""))
     assert harness.run("--exit-zero") == ExitCode.OK
