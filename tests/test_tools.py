@@ -80,6 +80,16 @@ def test_read_file_refuses_untracked_files(repo: Path, ignored: bool) -> None:
     assert "0123" not in text
 
 
+def test_tracked_symlink_to_untracked_file_is_refused(repo: Path) -> None:
+    (repo / "config" / "master.key").write_text("0123456789abcdef0123456789abcdef\n")
+    (repo / "key_link").symlink_to(repo / "config" / "master.key")
+    subprocess.run(["git", "add", "key_link"], cwd=repo, check=True)
+    text, is_error = _tools(repo).run("read_file", {"path": "key_link", "start_line": 1})
+    assert is_error
+    assert "not tracked by git" in text
+    assert "0123" not in text
+
+
 def test_read_file_redacts_secrets(repo: Path) -> None:
     tools = _tools(repo)
     text, _ = tools.run("read_file", {"path": "config/.env.production", "start_line": 1})
