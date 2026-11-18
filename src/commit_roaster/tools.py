@@ -1,7 +1,8 @@
 """Read-only tools that let Claude explore the repository during a ``--deep`` review.
 
 Every tool is read-only and confined to the repository: paths are resolved and
-must stay inside the root, ``.git`` is off limits, git always runs with an
+must stay inside the root, ``.git`` is off limits, only files tracked by git can
+be read (so git-ignored secrets like ``.env`` stay private), git always runs with an
 argument list (never a shell), and every result is size-capped and passed
 through the same secret redaction as the diff.
 """
@@ -68,7 +69,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "read_file",
         "description": (
-            "Read a file from the repository's working tree, with line numbers. Returns up "
+            "Read a file tracked by git from the working tree, with line numbers. Returns up "
             f"to {_READ_LINES} lines starting at start_line (1 for the beginning). Use it to "
             "read callers, similar code, models and helpers that the diff doesn't show."
         ),
@@ -188,7 +189,8 @@ class RepoTools:
     # ---------------------------------------------------------------- helpers
 
     def _resolve(self, relative: str) -> Path:
-        """A path inside the repository, or ToolError. Symlinks can't escape it."""
+        """A file tracked by git inside the repository, or ToolError. Symlinks can't
+        escape it, and git-ignored files (``.env``, ``config/master.key``) stay private."""
         candidate = (self._root / relative.lstrip("/")).resolve()
         if not candidate.is_relative_to(self._root):
             raise ToolError(f"{relative} is outside the repository.")
@@ -196,6 +198,9 @@ class RepoTools:
             raise ToolError("The .git folder is off limits.")
         if not candidate.is_file():
             raise ToolError(f"{relative} is not a file in the repository.")
+        tracked = candidate.relative_to(self._root).as_posix()
+        if tracked not in self._git.ls_files(f":(top,literal){tracked}"):
+            raise ToolError(f"{relative} is not tracked by git, so it can't be read.")
         return candidate
 
 

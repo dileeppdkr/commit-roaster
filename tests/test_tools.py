@@ -69,6 +69,17 @@ def test_symlink_cannot_escape(repo: Path) -> None:
     assert "outside the repository" in text
 
 
+@pytest.mark.parametrize("ignored", [False, True])
+def test_read_file_refuses_untracked_files(repo: Path, ignored: bool) -> None:
+    (repo / "config" / "master.key").write_text("0123456789abcdef0123456789abcdef\n")
+    if ignored:
+        (repo / ".gitignore").write_text("config/master.key\n")
+    text, is_error = _tools(repo).run("read_file", {"path": "config/master.key", "start_line": 1})
+    assert is_error
+    assert "not tracked by git" in text
+    assert "0123" not in text
+
+
 def test_read_file_redacts_secrets(repo: Path) -> None:
     tools = _tools(repo)
     text, _ = tools.run("read_file", {"path": "config/.env.production", "start_line": 1})

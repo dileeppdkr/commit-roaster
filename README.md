@@ -35,7 +35,7 @@ every git repository on your machine:
 ```bash
 pipx install commit-roaster            # or: uv tool install commit-roaster
 
-# Before the first PyPI release, install straight from GitHub:
+# Or the latest code from GitHub:
 pipx install git+https://github.com/dileeppdkr/commit-roaster.git
 ```
 
@@ -65,7 +65,7 @@ a missing key or an API outage would block the commit.
 ```yaml
 repos:
   - repo: https://github.com/dileeppdkr/commit-roaster
-    rev: v0.1.0
+    rev: v0.4.1
     hooks:
       - id: roast
         # Optional. Setting `args` replaces the hook's own args, so keep --exit-zero.
@@ -148,8 +148,9 @@ find the callers of a function you changed, the helper you just rewrote, or the 
 behind a query in a loop.
 
 - **Read-only and confined.** The tools can't write anything, can't leave the
-  repository (`..` and symlinks are refused) and can't read `.git`. Files Claude reads are
-  redacted for secrets, just like the diff.
+  repository (`..` and symlinks are refused) and can't read `.git`. They only see files
+  tracked by git, so git-ignored files such as `.env` or `config/master.key` stay
+  private. Files Claude reads are redacted for secrets, just like the diff.
 - **Bounded cost.** At most `--max-tool-calls` (default 20) tool calls; then Claude must
   answer. The conversation is prompt-cached, so re-reading it each turn is cheap. A deep
   review typically costs several times a normal one, and the cost line shows exactly
@@ -267,6 +268,10 @@ cent. For sharper roasts, try `--model claude-sonnet-5-5` or `claude-opus-5-5` (
 20 to 40 times the price).
 
 ### Secrets stay on your machine
+
+`roast` sends your diff to the Anthropic API, plus the files Claude reads with `--deep`.
+Nothing else leaves your machine. For work code, check that your company allows
+sending it to Anthropic first.
 
 Before anything is sent, `roast` replaces credentials in the diff with markers such as
 `[REDACTED AWS access key]`. It catches Anthropic, OpenAI, AWS, GitHub, Slack, Stripe
